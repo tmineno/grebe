@@ -1,6 +1,43 @@
 cmake_minimum_required(VERSION 3.24)
 project(vulkan-stream-poc VERSION 0.1.0 LANGUAGES CXX C)
 
+# =============================================================================
+# Windows Cross-Build from WSL2
+# =============================================================================
+# When WINDOWS_CROSS_BUILD=ON, skip all normal build logic and only define
+# custom targets that invoke the Windows build/run scripts via MSVC.
+# Usage: cmake --preset windows-release && cmake --build --preset windows-release
+
+option(WINDOWS_CROSS_BUILD "Cross-build for Windows via MSVC from WSL2" OFF)
+
+if(WINDOWS_CROSS_BUILD)
+    add_custom_target(windows-build ALL
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/build-windows.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Building Windows native .exe (MSVC)"
+    )
+    add_custom_target(run
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/run-windows.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Running Windows native .exe"
+    )
+    add_custom_target(profile
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/run-windows.sh --profile --ring-size=64M
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Running profile (Windows native)"
+    )
+    add_custom_target(bench
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/run-windows.sh --bench
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Running microbenchmarks (Windows native)"
+    )
+    return()
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -190,3 +227,31 @@ if(MSVC)
 else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# =============================================================================
+# Convenience targets (Linux)
+# =============================================================================
+
+add_custom_target(run
+    COMMAND $<TARGET_FILE:${PROJECT_NAME}>
+    DEPENDS ${PROJECT_NAME}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running ${PROJECT_NAME}"
+)
+
+add_custom_target(profile
+    COMMAND $<TARGET_FILE:${PROJECT_NAME}> --profile --ring-size=64M
+    DEPENDS ${PROJECT_NAME}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running profile"
+)
+
+add_custom_target(bench
+    COMMAND $<TARGET_FILE:${PROJECT_NAME}> --bench
+    DEPENDS ${PROJECT_NAME}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running microbenchmarks"
+)
