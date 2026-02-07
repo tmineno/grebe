@@ -84,7 +84,7 @@ void Hud::new_frame() {
 
 void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                             double ring_fill, uint32_t vertex_count, bool paused,
-                            DecimationMode dec_mode) {
+                            DecimationMode dec_mode, uint32_t channel_count) {
     ImGuiIO& io = ImGui::GetIO();
     float bar_height = 44.0f; // two lines
     float screen_width = io.DisplaySize.x;
@@ -116,8 +116,8 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
     else if (vertex_count >= 1'000) { display_vtx = vertex_count / 1e3; vtx_suffix = "K"; }
 
     // Line 1: overview
-    ImGui::Text("FPS: %.1f | Frame: %.2f ms | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
-                bench.fps(), bench.frame_time_avg(), display_rate, rate_suffix,
+    ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
+                bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
                 ring_fill * 100.0, display_vtx, vtx_suffix,
                 DecimationThread::mode_name(dec_mode),
                 paused ? " | PAUSED" : "");

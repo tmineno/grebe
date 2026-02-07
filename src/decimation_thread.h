@@ -18,10 +18,15 @@ public:
     DecimationThread& operator=(const DecimationThread&) = delete;
 
     void start(RingBuffer<int16_t>& ring, uint32_t target_points, DecimationMode mode);
+    void start(std::vector<RingBuffer<int16_t>*> rings, uint32_t target_points, DecimationMode mode);
     void stop();
+
+    uint32_t channel_count() const { return channel_count_.load(std::memory_order_relaxed); }
+    uint32_t per_channel_vertex_count() const { return per_ch_vtx_.load(std::memory_order_relaxed); }
 
     void set_mode(DecimationMode mode);
     void set_target_points(uint32_t n);
+    void set_sample_rate(double rate);
     void cycle_mode(); // None → MinMax → LTTB → None
 
     // Main thread: get latest decimated frame.
@@ -33,20 +38,25 @@ public:
     double decimation_ratio()   const { return decimate_ratio_.load(std::memory_order_relaxed); }
     double ring_fill_ratio()    const { return ring_fill_.load(std::memory_order_relaxed); }
     DecimationMode current_mode() const { return mode_.load(std::memory_order_relaxed); }
+    DecimationMode effective_mode() const { return effective_mode_.load(std::memory_order_relaxed); }
 
     static const char* mode_name(DecimationMode m);
 
 private:
     void thread_func();
 
-    RingBuffer<int16_t>* ring_ = nullptr;
+    std::vector<RingBuffer<int16_t>*> rings_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+    std::atomic<uint32_t> channel_count_{1};
+    std::atomic<uint32_t> per_ch_vtx_{0};
 
     // Settings
     std::atomic<DecimationMode> mode_{DecimationMode::None};
+    std::atomic<DecimationMode> effective_mode_{DecimationMode::None};
     std::atomic<uint32_t> target_points_{3840};
+    std::atomic<double> sample_rate_{0.0};
 
     // Double-buffered output
     std::mutex mutex_;

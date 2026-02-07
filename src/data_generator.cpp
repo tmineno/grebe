@@ -75,8 +75,12 @@ DataGenerator::~DataGenerator() {
 }
 
 void DataGenerator::start(RingBuffer<int16_t>& ring_buffer, double sample_rate, WaveformType type) {
+    start(std::vector<RingBuffer<int16_t>*>{&ring_buffer}, sample_rate, type);
+}
+
+void DataGenerator::start(std::vector<RingBuffer<int16_t>*> ring_buffers, double sample_rate, WaveformType type) {
     stop();
-    ring_buffer_ = &ring_buffer;
+    ring_buffers_ = std::move(ring_buffers);
     target_sample_rate_.store(sample_rate, std::memory_order_relaxed);
     waveform_type_.store(type, std::memory_order_relaxed);
     stop_requested_.store(false, std::memory_order_relaxed);
@@ -109,43 +113,56 @@ void DataGenerator::set_paused(bool paused) {
 }
 
 void DataGenerator::rebuild_period_buffer(double sample_rate, double frequency, WaveformType type) {
+    size_t num_channels = ring_buffers_.size();
+    channel_states_.resize(num_channels);
+
     if (type == WaveformType::WhiteNoise) {
-        // Noise: pre-generate a large random buffer (~1M samples)
         constexpr size_t NOISE_BUF_SIZE = 1'048'576;
-        period_len_ = NOISE_BUF_SIZE;
-        period_buf_.resize(NOISE_BUF_SIZE);
-        std::mt19937 rng(42);
-        std::uniform_int_distribution<int> dist(-32768, 32767);
-        for (size_t i = 0; i < NOISE_BUF_SIZE; i++) {
-            period_buf_[i] = static_cast<int16_t>(dist(rng));
+        for (size_t ch = 0; ch < num_channels; ch++) {
+            auto& cs = channel_states_[ch];
+            cs.period_len = NOISE_BUF_SIZE;
+            cs.period_buf.resize(NOISE_BUF_SIZE);
+            std::mt19937 rng(42 + static_cast<uint32_t>(ch)); // different seed per channel
+            std::uniform_int_distribution<int> dist(-32768, 32767);
+            for (size_t i = 0; i < NOISE_BUF_SIZE; i++) {
+                cs.period_buf[i] = static_cast<int16_t>(dist(rng));
+            }
+            cs.period_pos = 0;
         }
     } else {
-        // Periodic waveforms: compute one exact period
-        period_len_ = std::max(size_t(1), static_cast<size_t>(std::round(sample_rate / frequency)));
-        period_buf_.resize(period_len_);
+        size_t period_len = std::max(size_t(1), static_cast<size_t>(std::round(sample_rate / frequency)));
+        for (size_t ch = 0; ch < num_channels; ch++) {
+            auto& cs = channel_states_[ch];
+            cs.period_len = period_len;
+            cs.period_buf.resize(period_len);
 
-        for (size_t i = 0; i < period_len_; i++) {
-            double phase = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(period_len_);
-            switch (type) {
-            case WaveformType::Sine:
-                period_buf_[i] = static_cast<int16_t>(std::sin(phase) * 32767.0);
-                break;
-            case WaveformType::Square:
-                period_buf_[i] = (std::sin(phase) >= 0.0) ? static_cast<int16_t>(32767) : static_cast<int16_t>(-32768);
-                break;
-            case WaveformType::Sawtooth: {
-                double norm = static_cast<double>(i) / static_cast<double>(period_len_);
-                period_buf_[i] = static_cast<int16_t>((2.0 * norm - 1.0) * 32767.0);
-                break;
+            // Per-channel phase offset for visual differentiation
+            double ch_phase_offset = M_PI * static_cast<double>(ch) / static_cast<double>(num_channels);
+
+            for (size_t i = 0; i < period_len; i++) {
+                double phase = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(period_len) + ch_phase_offset;
+                switch (type) {
+                case WaveformType::Sine:
+                    cs.period_buf[i] = static_cast<int16_t>(std::sin(phase) * 32767.0);
+                    break;
+                case WaveformType::Square:
+                    cs.period_buf[i] = (std::sin(phase) >= 0.0) ? static_cast<int16_t>(32767) : static_cast<int16_t>(-32768);
+                    break;
+                case WaveformType::Sawtooth: {
+                    double norm = std::fmod(static_cast<double>(i) / static_cast<double>(period_len)
+                                            + 0.5 * static_cast<double>(ch) / static_cast<double>(num_channels), 1.0);
+                    cs.period_buf[i] = static_cast<int16_t>((2.0 * norm - 1.0) * 32767.0);
+                    break;
+                }
+                default:
+                    cs.period_buf[i] = 0;
+                    break;
+                }
             }
-            default:
-                period_buf_[i] = 0;
-                break;
-            }
+            cs.period_pos = 0;
         }
     }
 
-    period_pos_ = 0;
     cached_sample_rate_ = sample_rate;
     cached_frequency_ = frequency;
     cached_type_ = type;
@@ -190,6 +207,7 @@ void DataGenerator::thread_func() {
 
         // High-rate periodic waveforms: use memcpy period tiling
         bool use_tiling = high_rate && type != WaveformType::Chirp;
+        size_t num_channels = ring_buffers_.size();
 
         if (use_tiling) {
             // Rebuild period buffer if parameters changed
@@ -197,65 +215,79 @@ void DataGenerator::thread_func() {
                 rebuild_period_buffer(sample_rate, frequency, type);
             }
 
-            // Fill batch by tiling the pre-computed period buffer
-            size_t remaining = batch_size;
-            int16_t* dst = batch.data();
-            while (remaining > 0) {
-                size_t chunk = std::min(remaining, period_len_ - period_pos_);
-                std::memcpy(dst, &period_buf_[period_pos_], chunk * sizeof(int16_t));
-                dst += chunk;
-                remaining -= chunk;
-                period_pos_ += chunk;
-                if (period_pos_ >= period_len_) period_pos_ = 0;
+            // Fill batch by tiling per-channel period buffer
+            for (size_t ch = 0; ch < num_channels; ch++) {
+                auto& cs = channel_states_[ch];
+                size_t remaining = batch_size;
+                int16_t* dst = batch.data();
+                while (remaining > 0) {
+                    size_t chunk = std::min(remaining, cs.period_len - cs.period_pos);
+                    std::memcpy(dst, &cs.period_buf[cs.period_pos], chunk * sizeof(int16_t));
+                    dst += chunk;
+                    remaining -= chunk;
+                    cs.period_pos += chunk;
+                    if (cs.period_pos >= cs.period_len) cs.period_pos = 0;
+                }
+                ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
             }
         } else {
-            // Low-rate or chirp: per-sample LUT generation
+            // Low-rate or chirp: per-sample LUT generation (channel 0 only uses phase_acc)
             double lut_increment = frequency * static_cast<double>(SINE_LUT_SIZE) / sample_rate;
 
-            switch (type) {
-            case WaveformType::Sine:
-                for (size_t i = 0; i < batch_size; i++) {
-                    size_t idx = static_cast<size_t>(phase_acc) & (SINE_LUT_SIZE - 1);
-                    batch[i] = sine_lut_[idx];
-                    phase_acc += lut_increment;
-                }
-                break;
+            // Generate and push for each channel
+            for (size_t ch = 0; ch < num_channels; ch++) {
+                double ch_phase_offset = static_cast<double>(SINE_LUT_SIZE) * 0.5 * static_cast<double>(ch) / static_cast<double>(num_channels);
+                double ch_phase = phase_acc + ch_phase_offset;
 
-            case WaveformType::Square:
-                for (size_t i = 0; i < batch_size; i++) {
-                    size_t idx = static_cast<size_t>(phase_acc) & (SINE_LUT_SIZE - 1);
-                    batch[i] = sine_lut_[idx] >= 0 ? static_cast<int16_t>(32767) : static_cast<int16_t>(-32768);
-                    phase_acc += lut_increment;
-                }
-                break;
+                switch (type) {
+                case WaveformType::Sine:
+                    for (size_t i = 0; i < batch_size; i++) {
+                        size_t idx = static_cast<size_t>(ch_phase) & (SINE_LUT_SIZE - 1);
+                        batch[i] = sine_lut_[idx];
+                        ch_phase += lut_increment;
+                    }
+                    break;
 
-            case WaveformType::Sawtooth:
-                for (size_t i = 0; i < batch_size; i++) {
-                    double norm = phase_acc / static_cast<double>(SINE_LUT_SIZE);
-                    norm = norm - std::floor(norm); // [0, 1)
-                    batch[i] = static_cast<int16_t>((2.0 * norm - 1.0) * 32767.0);
-                    phase_acc += lut_increment;
-                }
-                break;
+                case WaveformType::Square:
+                    for (size_t i = 0; i < batch_size; i++) {
+                        size_t idx = static_cast<size_t>(ch_phase) & (SINE_LUT_SIZE - 1);
+                        batch[i] = sine_lut_[idx] >= 0 ? static_cast<int16_t>(32767) : static_cast<int16_t>(-32768);
+                        ch_phase += lut_increment;
+                    }
+                    break;
 
-            case WaveformType::WhiteNoise:
-                for (size_t i = 0; i < batch_size; i++) {
-                    batch[i] = static_cast<int16_t>(noise_dist(rng));
-                }
-                phase_acc += lut_increment * static_cast<double>(batch_size);
-                break;
+                case WaveformType::Sawtooth:
+                    for (size_t i = 0; i < batch_size; i++) {
+                        double norm = ch_phase / static_cast<double>(SINE_LUT_SIZE);
+                        norm = norm - std::floor(norm);
+                        batch[i] = static_cast<int16_t>((2.0 * norm - 1.0) * 32767.0);
+                        ch_phase += lut_increment;
+                    }
+                    break;
 
-            case WaveformType::Chirp:
-                for (size_t i = 0; i < batch_size; i++) {
-                    size_t idx = static_cast<size_t>(phase_acc) & (SINE_LUT_SIZE - 1);
-                    batch[i] = sine_lut_[idx];
-                    double t = static_cast<double>(samples_generated + i) / sample_rate;
-                    double sweep = std::fmod(t, 1.0);
-                    double inst_freq = frequency * (1.0 + 9.0 * sweep);
-                    phase_acc += inst_freq * static_cast<double>(SINE_LUT_SIZE) / sample_rate;
+                case WaveformType::WhiteNoise:
+                    for (size_t i = 0; i < batch_size; i++) {
+                        batch[i] = static_cast<int16_t>(noise_dist(rng));
+                    }
+                    break;
+
+                case WaveformType::Chirp:
+                    for (size_t i = 0; i < batch_size; i++) {
+                        size_t idx = static_cast<size_t>(ch_phase) & (SINE_LUT_SIZE - 1);
+                        batch[i] = sine_lut_[idx];
+                        double t = static_cast<double>(samples_generated + i) / sample_rate;
+                        double sweep = std::fmod(t, 1.0);
+                        double inst_freq = frequency * (1.0 + 9.0 * sweep);
+                        ch_phase += inst_freq * static_cast<double>(SINE_LUT_SIZE) / sample_rate;
+                    }
+                    break;
                 }
-                break;
+
+                ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
             }
+
+            // Advance the base phase accumulator (channel 0's amount)
+            phase_acc += lut_increment * static_cast<double>(batch_size);
 
             // Keep phase accumulator from growing unbounded
             if (phase_acc > static_cast<double>(SINE_LUT_SIZE) * 1e6) {
@@ -263,24 +295,13 @@ void DataGenerator::thread_func() {
             }
         }
 
-        // Push to ring buffer
-        size_t pushed = ring_buffer_->push_bulk(batch.data(), batch_size);
-        samples_generated += pushed;
+        // Track total samples (per-channel count)
+        samples_generated += batch_size;
         total_samples_.store(samples_generated, std::memory_order_relaxed);
 
-        // Backpressure: yield when ring buffer is full
-        if (pushed < batch_size) {
-            if (high_rate) {
-                std::this_thread::yield();
-            } else {
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            }
-            next_wake = Clock::now();
-            continue;
-        }
-
-        // Rate measurement (update every 100ms)
-        rate_sample_count += pushed;
+        // Rate measurement (update every 100ms) — must be before backpressure
+        // check, otherwise backpressure `continue` skips counting generated batches
+        rate_sample_count += batch_size;
         auto now = Clock::now();
         auto elapsed = std::chrono::duration<double>(now - rate_timer_start).count();
         if (elapsed >= 0.1) {
@@ -288,6 +309,17 @@ void DataGenerator::thread_func() {
             rate_timer_start = now;
             rate_sample_count = 0;
         }
+
+        // Backpressure: extra delay when any ring buffer is nearly full
+        // (don't skip pacing — that causes uncontrolled generation rate)
+        bool any_full = false;
+        for (auto* rb : ring_buffers_) {
+            if (rb->fill_ratio() > 0.9) { any_full = true; break; }
+        }
+        if (any_full && !high_rate) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        // Fall through to pacing unconditionally
 
         // Pacing: target the requested rate
         double batch_duration = static_cast<double>(batch_size) / sample_rate;

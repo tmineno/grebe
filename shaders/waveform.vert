@@ -8,7 +8,13 @@ layout(push_constant) uniform PushConstants {
     float horizontal_scale;
     float horizontal_offset;
     int   vertex_count;
+    float color_r;
+    float color_g;
+    float color_b;
+    float color_a;
 } pc;
+
+layout(location = 0) out vec4 vColor;
 
 void main() {
     // X: spread vertices across [-1, 1] based on index and vertex count
@@ -19,4 +25,5 @@ void main() {
     float y = (float(inSample) / 32767.0) * pc.amplitude_scale + pc.vertical_offset;
 
     gl_Position = vec4(x, -y, 0.0, 1.0); // flip Y for screen coords
+    vColor = vec4(pc.color_r, pc.color_g, pc.color_b, pc.color_a);
 }

@@ -16,6 +16,10 @@ struct WaveformPushConstants {
     float horizontal_scale  = 1.0f;
     float horizontal_offset = 0.0f;
     int   vertex_count      = 0;
+    float color_r           = 0.0f;
+    float color_g           = 1.0f;
+    float color_b           = 0.0f;
+    float color_a           = 1.0f;
 };
 
 class Renderer {
@@ -32,8 +36,15 @@ public:
     void destroy();
 
     // Returns false if swapchain needs recreation
+    // Multi-channel: draws N channels with per-channel push constants and firstVertex offsets
     bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
-                    const WaveformPushConstants& push_constants, Hud* hud = nullptr);
+                    const WaveformPushConstants* channel_pcs, uint32_t num_channels, Hud* hud = nullptr);
+
+    // Single-channel convenience overload
+    bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
+                    const WaveformPushConstants& push_constants, Hud* hud = nullptr) {
+        return draw_frame(ctx, swapchain, buf_mgr, &push_constants, 1, hud);
+    }
 
     void on_swapchain_recreated(VulkanContext& ctx, Swapchain& swapchain);
 

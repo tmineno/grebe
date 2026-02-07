@@ -61,7 +61,7 @@ void Renderer::destroy() {
 }
 
 bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
-                          const WaveformPushConstants& push_constants, Hud* hud) {
+                          const WaveformPushConstants* channel_pcs, uint32_t num_channels, Hud* hud) {
     // Wait for previous frame with this index to finish
     vkWaitForFences(ctx.device(), 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
 
@@ -119,16 +119,24 @@ bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManage
     scissor.extent = swapchain.extent();
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    // Push constants
-    vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(WaveformPushConstants), &push_constants);
-
-    // Bind vertex buffer and draw
+    // Bind vertex buffer (shared across all channels)
     if (buf_mgr.vertex_buffer() && buf_mgr.vertex_count() > 0) {
         VkBuffer buffers[] = {buf_mgr.vertex_buffer()};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cmd, 0, 1, buffers, offsets);
-        vkCmdDraw(cmd, buf_mgr.vertex_count(), 1, 0, 0);
+
+        // Per-channel draw with push constants
+        uint32_t first_vertex = 0;
+        for (uint32_t ch = 0; ch < num_channels; ch++) {
+            const auto& pc = channel_pcs[ch];
+            vkCmdPushConstants(cmd, pipeline_layout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(WaveformPushConstants), &pc);
+            if (pc.vertex_count > 0) {
+                vkCmdDraw(cmd, static_cast<uint32_t>(pc.vertex_count), 1, first_vertex, 0);
+            }
+            first_vertex += static_cast<uint32_t>(pc.vertex_count);
+        }
     }
 
     // Render HUD overlay (ImGui)
@@ -335,9 +343,9 @@ void Renderer::create_pipeline(VkDevice device, const std::string& shader_dir) {
     dynamic_state.dynamicStateCount = 2;
     dynamic_state.pDynamicStates = dynamic_states;
 
-    // Push constants
+    // Push constants (accessible from both vertex and fragment stages)
     VkPushConstantRange push_range = {};
-    push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     push_range.offset = 0;
     push_range.size = sizeof(WaveformPushConstants);
 

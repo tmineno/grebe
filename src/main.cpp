@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -63,16 +64,28 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
         if (state && state->dec_thread) state->dec_thread->cycle_mode();
         break;
     case GLFW_KEY_1:
-        if (state && state->data_gen) state->data_gen->set_sample_rate(1e6);
+        if (state && state->data_gen) {
+            state->data_gen->set_sample_rate(1e6);
+            if (state->dec_thread) state->dec_thread->set_sample_rate(1e6);
+        }
         break;
     case GLFW_KEY_2:
-        if (state && state->data_gen) state->data_gen->set_sample_rate(10e6);
+        if (state && state->data_gen) {
+            state->data_gen->set_sample_rate(10e6);
+            if (state->dec_thread) state->dec_thread->set_sample_rate(10e6);
+        }
         break;
     case GLFW_KEY_3:
-        if (state && state->data_gen) state->data_gen->set_sample_rate(100e6);
+        if (state && state->data_gen) {
+            state->data_gen->set_sample_rate(100e6);
+            if (state->dec_thread) state->dec_thread->set_sample_rate(100e6);
+        }
         break;
     case GLFW_KEY_4:
-        if (state && state->data_gen) state->data_gen->set_sample_rate(1e9);
+        if (state && state->data_gen) {
+            state->data_gen->set_sample_rate(1e9);
+            if (state->dec_thread) state->dec_thread->set_sample_rate(1e9);
+        }
         break;
     case GLFW_KEY_SPACE:
         if (state && state->data_gen)
@@ -90,6 +103,7 @@ int main(int argc, char* argv[]) {
         bool enable_profile = false;
         bool enable_bench = false;
         size_t ring_size = 16'777'216; // 16M samples default
+        uint32_t num_channels = 1;
         for (int i = 1; i < argc; i++) {
             std::string arg(argv[i]);
             if (arg == "--log") enable_log = true;
@@ -105,6 +119,13 @@ int main(int argc, char* argv[]) {
                     else if (suffix == 'K' || suffix == 'k') { multiplier = 1024; val.pop_back(); }
                 }
                 ring_size = std::stoull(val) * multiplier;
+            }
+            else if (arg.rfind("--channels=", 0) == 0) {
+                num_channels = static_cast<uint32_t>(std::stoul(arg.substr(11)));
+                if (num_channels < 1 || num_channels > 8) {
+                    spdlog::error("--channels must be 1-8, got {}", num_channels);
+                    return 1;
+                }
             }
         }
 
@@ -179,9 +200,15 @@ int main(int argc, char* argv[]) {
         Hud hud;
         hud.init(window, ctx, renderer.render_pass(), swapchain.image_count());
 
-        // Streaming pipeline
-        RingBuffer<int16_t> ring_buffer(ring_size + 1); // +1 for SPSC sentinel
-        spdlog::info("Ring buffer: {} samples ({} MB)", ring_size, ring_size * 2 / (1024 * 1024));
+        // Streaming pipeline: N ring buffers (one per channel)
+        std::vector<std::unique_ptr<RingBuffer<int16_t>>> ring_buffers;
+        std::vector<RingBuffer<int16_t>*> ring_ptrs;
+        for (uint32_t ch = 0; ch < num_channels; ch++) {
+            ring_buffers.push_back(std::make_unique<RingBuffer<int16_t>>(ring_size + 1));
+            ring_ptrs.push_back(ring_buffers.back().get());
+        }
+        spdlog::info("Ring buffers: {}ch × {} samples ({} MB each)",
+                     num_channels, ring_size, ring_size * 2 / (1024 * 1024));
 
         app_state.swapchain = &swapchain;
         app_state.renderer = &renderer;
@@ -190,19 +217,22 @@ int main(int argc, char* argv[]) {
 
         DataGenerator data_gen;
         app_state.data_gen = &data_gen;
-        data_gen.start(ring_buffer, 1'000'000.0, WaveformType::Sine);
+        data_gen.start(ring_ptrs, 1'000'000.0, WaveformType::Sine);
 
         // Decimation thread (Phase 2)
         constexpr uint32_t DECIMATE_TARGET = 1920 * 2; // min/max pairs for screen width
-        DecimationMode default_mode = enable_profile ? DecimationMode::MinMax : DecimationMode::MinMax;
+        DecimationMode default_mode = DecimationMode::MinMax;
         DecimationThread dec_thread;
         app_state.dec_thread = &dec_thread;
-        dec_thread.start(ring_buffer, DECIMATE_TARGET, default_mode);
+        dec_thread.start(ring_ptrs, DECIMATE_TARGET, default_mode);
+        dec_thread.set_sample_rate(1'000'000.0);
 
-        spdlog::info("Streaming started: 1 MSPS, Sine wave, decimation={}", DecimationThread::mode_name(default_mode));
+        spdlog::info("Streaming started: {}ch, 1 MSPS, Sine wave, decimation={}",
+                     num_channels, DecimationThread::mode_name(default_mode));
 
         // Profile mode
         ProfileRunner profiler;
+        profiler.set_channel_count(num_channels);
         if (enable_profile) {
             spdlog::info("Profile mode enabled — auto-cycling through scenarios");
             if (!benchmark.is_logging()) {
@@ -217,13 +247,34 @@ int main(int argc, char* argv[]) {
         // Per-frame data buffer (receives decimated output)
         std::vector<int16_t> frame_data;
 
-        // Push constants
-        WaveformPushConstants push_constants;
-        push_constants.amplitude_scale = 0.8f;
-        push_constants.vertical_offset = 0.0f;
-        push_constants.horizontal_scale = 1.0f;
-        push_constants.horizontal_offset = 0.0f;
-        push_constants.vertex_count = 0;
+        // Channel color palette (oscilloscope standard)
+        struct ChannelColor { float r, g, b; };
+        const ChannelColor palette[] = {
+            {0.0f, 1.0f, 0.0f},  // Ch0: green
+            {1.0f, 1.0f, 0.0f},  // Ch1: yellow
+            {0.0f, 1.0f, 1.0f},  // Ch2: cyan
+            {1.0f, 0.0f, 1.0f},  // Ch3: magenta
+            {1.0f, 0.5f, 0.0f},  // Ch4: orange
+            {1.0f, 1.0f, 1.0f},  // Ch5: white
+            {1.0f, 0.3f, 0.3f},  // Ch6: red
+            {0.3f, 0.5f, 1.0f},  // Ch7: blue
+        };
+
+        // Per-channel push constants
+        std::vector<WaveformPushConstants> channel_pcs(num_channels);
+        float n = static_cast<float>(num_channels);
+        for (uint32_t ch = 0; ch < num_channels; ch++) {
+            auto& pc = channel_pcs[ch];
+            pc.amplitude_scale = 0.8f / n;
+            pc.vertical_offset = 1.0f - (2.0f * ch + 1.0f) / n;
+            pc.horizontal_scale = 1.0f;
+            pc.horizontal_offset = 0.0f;
+            pc.vertex_count = 0;
+            pc.color_r = palette[ch].r;
+            pc.color_g = palette[ch].g;
+            pc.color_b = palette[ch].b;
+            pc.color_a = 1.0f;
+        }
 
         // Title update throttle
         double last_title_update = glfwGetTime();
@@ -282,18 +333,22 @@ int main(int argc, char* argv[]) {
 
             benchmark.set_vertex_count(buf_mgr.vertex_count());
 
-            // Update push constants with current draw buffer vertex count
-            push_constants.vertex_count = static_cast<int>(buf_mgr.vertex_count());
+            // Update per-channel vertex counts from decimation thread
+            uint32_t per_ch_vtx = dec_thread.per_channel_vertex_count();
+            for (uint32_t ch = 0; ch < num_channels; ch++) {
+                channel_pcs[ch].vertex_count = static_cast<int>(per_ch_vtx);
+            }
 
             // Build ImGui frame
             hud.new_frame();
             hud.build_status_bar(benchmark, data_gen.actual_sample_rate(),
                                  dec_thread.ring_fill_ratio(), buf_mgr.vertex_count(),
-                                 data_gen.is_paused(), dec_thread.current_mode());
+                                 data_gen.is_paused(), dec_thread.effective_mode(),
+                                 num_channels);
 
             // Render (timed)
             t0 = Benchmark::now();
-            bool ok = renderer.draw_frame(ctx, swapchain, buf_mgr, push_constants, &hud);
+            bool ok = renderer.draw_frame(ctx, swapchain, buf_mgr, channel_pcs.data(), num_channels, &hud);
             benchmark.set_render_time(Benchmark::elapsed_ms(t0));
             if (!ok) {
                 // Swapchain out of date — recreate
@@ -314,7 +369,7 @@ int main(int argc, char* argv[]) {
                 profiler.on_frame(benchmark, buf_mgr.vertex_count(),
                                   data_gen.actual_sample_rate(),
                                   dec_thread.ring_fill_ratio(),
-                                  data_gen, window);
+                                  data_gen, dec_thread, window);
             }
 
             // Update window title with FPS (throttled to 4 Hz)
@@ -322,9 +377,10 @@ int main(int argc, char* argv[]) {
             if (now - last_title_update >= 0.25) {
                 char title[128];
                 std::snprintf(title, sizeof(title),
-                              "Grebe | FPS: %.1f | Frame: %.2f ms | %s",
+                              "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s",
                               benchmark.fps(), benchmark.frame_time_avg(),
-                              DecimationThread::mode_name(dec_thread.current_mode()));
+                              num_channels,
+                              DecimationThread::mode_name(dec_thread.effective_mode()));
                 glfwSetWindowTitle(window, title);
                 last_title_update = now;
             }

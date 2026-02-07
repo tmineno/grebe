@@ -1,6 +1,7 @@
 #include "profiler.h"
 #include "benchmark.h"
 #include "data_generator.h"
+#include "decimation_thread.h"
 
 #include <GLFW/glfw3.h>
 #include <nlohmann/json.hpp>
@@ -27,7 +28,8 @@ bool ProfileRunner::should_continue() const {
 
 void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              double data_rate, double ring_fill,
-                             DataGenerator& data_gen, GLFWwindow* window) {
+                             DataGenerator& data_gen, DecimationThread& dec_thread,
+                             GLFWwindow* window) {
     if (finished_) return;
 
     const auto& scenario = scenarios_[current_scenario_];
@@ -39,6 +41,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         current_samples_.clear();
         current_samples_.reserve(scenario.measure_frames);
         data_gen.set_sample_rate(scenario.sample_rate);
+        dec_thread.set_sample_rate(scenario.sample_rate);
         spdlog::info("[profile] Starting scenario '{}' (rate={:.0f}, warmup={}, measure={})",
                      scenario.name, scenario.sample_rate,
                      scenario.warmup_frames, scenario.measure_frames);
@@ -210,6 +213,7 @@ int ProfileRunner::generate_report() const {
         scenarios_json.push_back(s);
     }
     report["scenarios"] = scenarios_json;
+    report["channel_count"] = channel_count_;
     report["overall_pass"] = overall_pass;
 
     // Write JSON file

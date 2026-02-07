@@ -30,8 +30,10 @@ public:
     DataGenerator(const DataGenerator&) = delete;
     DataGenerator& operator=(const DataGenerator&) = delete;
 
-    // Phase 1: threaded streaming generator
+    // Phase 1: threaded streaming generator (single channel)
     void start(RingBuffer<int16_t>& ring_buffer, double sample_rate, WaveformType type);
+    // Phase 5: multi-channel streaming generator
+    void start(std::vector<RingBuffer<int16_t>*> ring_buffers, double sample_rate, WaveformType type);
     void stop();
 
     void set_sample_rate(double rate);
@@ -51,15 +53,18 @@ private:
     // Pre-computed sine lookup table (int16 values)
     std::array<int16_t, SINE_LUT_SIZE> sine_lut_;
 
-    // Period tiling: pre-computed waveform period for memcpy-based generation
-    std::vector<int16_t> period_buf_;
-    size_t period_len_ = 0;
-    size_t period_pos_ = 0;
+    // Period tiling: per-channel pre-computed waveform period for memcpy-based generation
+    struct ChannelState {
+        std::vector<int16_t> period_buf;
+        size_t period_len = 0;
+        size_t period_pos = 0;
+    };
+    std::vector<ChannelState> channel_states_;
     double cached_sample_rate_ = 0;
     double cached_frequency_ = 0;
     WaveformType cached_type_ = WaveformType::Sine;
 
-    RingBuffer<int16_t>* ring_buffer_ = nullptr;
+    std::vector<RingBuffer<int16_t>*> ring_buffers_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

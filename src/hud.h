@@ -27,7 +27,8 @@ public:
     void new_frame();
     void build_status_bar(const Benchmark& bench, double data_rate,
                           double ring_fill, uint32_t vertex_count, bool paused,
-                          DecimationMode dec_mode = DecimationMode::None);
+                          DecimationMode dec_mode = DecimationMode::None,
+                          uint32_t channel_count = 1);
 
     // Call inside the active render pass
     void render(VkCommandBuffer cmd);

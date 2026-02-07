@@ -7,6 +7,7 @@
 struct GLFWwindow;
 class Benchmark;
 class DataGenerator;
+class DecimationThread;
 
 struct FrameSample {
     double frame_time_ms  = 0.0;
@@ -68,7 +69,10 @@ public:
     // Sets glfwSetWindowShouldClose when all done.
     void on_frame(const Benchmark& bench, uint32_t vertex_count,
                   double data_rate, double ring_fill,
-                  DataGenerator& data_gen, GLFWwindow* window);
+                  DataGenerator& data_gen, DecimationThread& dec_thread,
+                  GLFWwindow* window);
+
+    void set_channel_count(uint32_t n) { channel_count_ = n; }
 
     // Generate report to stdout + JSON file.
     // Returns exit code: 0 = all pass, 1 = any fail.
@@ -85,4 +89,5 @@ private:
     int frame_in_scenario_ = 0;
     bool finished_ = false;
     bool scenario_started_ = false;
+    uint32_t channel_count_ = 1;
 };
