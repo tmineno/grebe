@@ -1,6 +1,6 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.0.0
+**バージョン:** 1.3.0
 **最終更新:** 2026-02-07
 
 ---
@@ -35,6 +35,13 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 - 保存・再生機能
 - 本格的な UI/UX（メニュー、設定画面等）
 - ネットワーク経由のデータ受信
+
+**次期マイルストーン（本書で要件化、実装はこれから）:**
+- 実行バイナリの分離: `grebe` (可視化メイン) / `grebe-sg` (信号生成)
+- `grebe` から `grebe-sg` の自動起動（デフォルト）と attach モード
+- SG 専用 UI（チャンネル設定）と Main 可視化 UI の責務分離
+- Shared Memory (`memcpy`) ベース IPC と外部I/F評価向けトランスポート抽象化
+- フェーズ境界ごとに必ず runnable な 2 プロセス系を維持（分離だけで通信不能な中間状態を作らない）
 
 ---
 
@@ -79,66 +86,195 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 ### 3.1 パイプライン全体像
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        メインプロセス                                │
-│                                                                     │
-│  [データ生成スレッド]                                                 │
-│       │ Period tiling (memcpy) ≥100 MSPS / LUT <100 MSPS           │
-│       │                                                             │
-│       │ lock-free SPSC ring buffer (CPU memory, 16M-64M samples)   │
-│       ▼                                                             │
-│  [間引きスレッド]                                                     │
-│       │ MinMax (SSE2 SIMD) / LTTB → 3840 頂点/フレーム              │
-│       │                                                             │
-│       │ double buffer swap (mutex)                                  │
-│       ▼                                                             │
-│  [描画スレッド (メイン)]                                               │
-│       │                                                             │
-│       ├── Staging Buffer 書き込み (triple-buffered)                  │
-│       ├── vkCmdCopyBuffer → Device Local Buffer                     │
-│       ├── vkCmdDraw (LINE_STRIP, int16 vertex format)               │
-│       ├── ImGui HUD オーバーレイ                                     │
-│       └── vkQueuePresent                                            │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐          Control + Data (IPC)         ┌───────────────────────────────────┐
+│        grebe-sg プロセス      │ ─────────────────────────────────────▶ │            grebe プロセス          │
+│     (Signal Generator UI)    │                                       │        (Visualization UI)         │
+│                              │ ◀───────────────────────────────────── │                                   │
+│  [SG UI]                     │          Status / backpressure         │  [IPC 受信]                        │
+│   ├─ global sample rate      │                                       │   ├─ Shared memory dequeue        │
+│   └─ per-ch waveform/length  │                                       │   └─ sequence/timestamp validation│
+│                              │                                       │  [間引きスレッド]                  │
+│  [データ生成スレッド]          │                                       │   └─ MinMax/LTTB                  │
+│   └─ push frame blocks       │                                       │  [描画スレッド (メイン)]            │
+│      to transport producer   │                                       │   └─ Vulkan render + HUD          │
+└──────────────────────────────┘                                       └───────────────────────────────────┘
 ```
 
 ### 3.2 コンポーネント構成
 
 ```
-vulkan-stream-poc/
+grebe/
 ├── src/
-│   ├── main.cpp                  # エントリポイント、CLI解析、メインループ
-│   ├── vulkan_context.h/cpp      # Vulkan 初期化・デバイス管理
-│   ├── swapchain.h/cpp           # スワップチェーン管理
-│   ├── renderer.h/cpp            # 描画パイプライン (LINE_STRIP)
-│   ├── buffer_manager.h/cpp      # Triple-buffered Staging/Device バッファ管理
-│   ├── data_generator.h/cpp      # 合成データ生成 (period tiling + LUT)
-│   ├── decimator.h/cpp           # 間引きアルゴリズム (MinMax SIMD / LTTB)
-│   ├── decimation_thread.h/cpp   # 間引きワーカースレッド + ダブルバッファ出力
-│   ├── ring_buffer.h             # lock-free SPSC ring buffer
-│   ├── benchmark.h/cpp           # テレメトリ収集・ローリング平均・CSV出力
-│   ├── hud.h/cpp                 # ImGui メトリクス HUD
-│   ├── profiler.h/cpp            # 自動プロファイリングフレームワーク
-│   ├── microbench.h/cpp          # 独立マイクロベンチマーク (BM-A/B/C/E)
-│   ├── compute_decimator.h/cpp   # GPU Compute Shader 間引き (実験)
-│   └── vma_impl.cpp              # Vulkan Memory Allocator 実装
+│   ├── app_grebe/                # 可視化メイン実行バイナリ (grebe)
+│   │   ├── main.cpp              # エントリポイント、SG起動/attach制御
+│   │   ├── vulkan_context.*      # Vulkan 初期化・デバイス管理
+│   │   ├── swapchain.*           # スワップチェーン管理
+│   │   ├── renderer.*            # 描画パイプライン
+│   │   ├── buffer_manager.*      # Triple-buffered upload
+│   │   ├── decimator.*           # 間引きアルゴリズム
+│   │   ├── decimation_thread.*   # 間引きワーカースレッド
+│   │   ├── benchmark.*           # テレメトリ収集
+│   │   └── hud.*                 # Main UI/HUD
+│   ├── app_grebe_sg/             # 信号生成実行バイナリ (grebe-sg)
+│   │   ├── main.cpp              # SG UI + 設定適用 (GLFW + OpenGL + ImGui)
+│   │   └── data_generator.*      # 合成データ生成
+│   ├── ipc/                      # プロセス間通信契約/実装
+│   │   ├── contracts.h           # SignalConfigV2, FrameHeaderV2 等
+│   │   ├── transport.h           # Producer/Consumer 抽象I/F
+│   │   └── shm_transport.*       # Shared memory (memcpy) 実装
+│   └── common/                   # 共有ユーティリティ (ring_buffer.h, types.h, time_utils.h など)
 ├── shaders/
-│   ├── waveform.vert             # 頂点シェーダ (int16 → NDC)
-│   ├── waveform.frag             # フラグメントシェーダ
-│   └── minmax_decimate.comp      # GPU Compute MinMax シェーダ
 ├── doc/
-│   ├── RDD.md                    # 本書
-│   ├── TODO.md                   # マイルストーン・将来拡張
-│   └── technical_judgment.md     # TI-01〜06 技術的判断メモ
-├── scripts/
-│   ├── setup-windows.sh          # Windows 依存インストール
-│   ├── build-windows.sh          # WSL2→MSVC ビルド
-│   └── run-windows.sh            # Windows .exe 実行ヘルパー
-├── CMakeLists.txt
-├── CMakePresets.json
-└── README.md
+└── scripts/
 ```
+
+**実装方針メモ:**
+- `src/` の大規模ディレクトリ移動は高リスクのため、ロジック変更と分離せず独立コミットで実施する
+- フェーズ初期は既存配置を維持したまま 2 プロセス化を優先し、段階的に再配置してよい
+
+### 3.3 IPC プロトコル仕様 (v2)
+
+`grebe-sg` (producer) と `grebe` (consumer) は Shared Memory 上の
+**ControlBlockV2 + ConsumerStatusBlockV2 + DataRingV2** で通信する。
+本仕様は単一バージョン運用とし、後方互換は考慮しない。
+
+#### 3.3.1 共有メモリオブジェクト
+
+| 名称 | 既定名 | 用途 | 読み書き |
+|---|---|---|---|
+| ControlBlockV2 | `grebe-ipc-ctrl` | discovery / config / queue descriptor / producer heartbeat | SG 書き込み, Main 読み取り |
+| ConsumerStatusBlockV2 | `grebe-ipc-cons` | credit window / consumer heartbeat / read progress | Main 書き込み, SG 読み取り |
+| DataRingV2 | `grebe-ipc-data-<generation>` | フレームデータ本体リング | SG 書き込み, Main 読み取り |
+
+#### 3.3.2 制御ブロック/状態ブロック
+
+```c
+struct SignalConfigV2 {
+    uint32_t version;               // = 2
+    uint32_t channel_count;         // 1..8
+    double   global_sample_rate_hz;
+    uint32_t block_length_samples;  // 全ch共通固定長
+    struct {
+        uint8_t enabled;
+        uint8_t waveform;
+        uint16_t reserved;
+    } channels[8];
+};
+
+struct DataRingDescV2 {
+    uint32_t slot_count;            // 既定 64
+    uint32_t slot_stride_bytes;     // header + payload + alignment
+    uint32_t max_payload_bytes;
+    uint32_t feature_flags;         // bit0=doorbell_event, bit1=payload_crc32c
+};
+
+struct ControlBlockV2 {
+    uint32_t magic;                 // 'GRB2'
+    uint32_t abi_version;           // = 2
+    uint32_t endianness;            // 0=little
+    uint32_t reserved0;
+    uint64_t generation;
+    uint64_t producer_heartbeat_ns;
+    char     data_segment_name[64];
+    DataRingDescV2 ring_desc;
+    SignalConfigV2 active_config;
+    uint32_t status_flags;          // bit0=ready, bit1=degraded
+    uint32_t reserved1;
+};
+
+struct ConsumerStatusBlockV2 {
+    uint32_t magic;                 // 'GCS2'
+    uint32_t version;               // = 2
+    uint64_t observed_generation;
+    uint64_t consumer_heartbeat_ns;
+    uint64_t read_sequence;         // 取り込み完了済みseq
+    uint32_t credits_granted;       // producer送信可能枠
+    uint32_t last_error_code;
+    uint64_t drops_observed;
+};
+```
+
+#### 3.3.3 DataRingV2 frame header
+
+```c
+struct FrameHeaderV2 {
+    uint32_t version;               // = 2
+    uint32_t header_bytes;
+    uint64_t generation;
+    uint64_t sequence;              // 単調増加
+    uint64_t producer_ts_ns;
+    uint32_t stream_id;             // v2では0固定
+    uint32_t flags;                 // bit0=CONFIG_BOUNDARY, bit1=DROPPED_PRIOR
+    uint32_t channel_count;
+    uint32_t block_length_samples;
+    uint32_t payload_bytes;
+    uint32_t header_crc32c;         // 必須
+    uint32_t payload_crc32c;        // feature_flagsで有効時のみ
+    uint32_t reserved;
+    // payload: [ch0][ch1]...[chN-1] (channel-major)
+};
+```
+
+v2 既定値:
+- `block_length_samples = 65536`
+- `slot_count = 64`
+- `sequence gap 許容 = 0` (gap は drop として記録)
+
+#### 3.3.4 フロー制御/通知/同期
+
+- credit-based window を必須とする:
+  - `inflight = write_sequence - read_sequence`
+  - `inflight < credits_granted` の場合のみ producer は publish 可能
+- credit 枯渇時の方針は **drop-new**（loss-tolerant realtime）
+- 同期:
+  - SG は payload 完了後 header 確定、最後に write index を release publish
+  - Main は acquire load 後に header CRC 検証、問題なければ payload を読む
+- 通知:
+  - 必須: poll mode
+  - 任意: `doorbell_event`（eventfd/OS event）を `feature_flags` で有効化
+
+#### 3.3.5 ハンドシェイク/状態遷移
+
+1. SG 起動:
+- `generation` 採番
+- DataRingV2 作成
+- ControlBlockV2 更新 (`ready=1`)
+
+2. Main auto-spawn/attach:
+- `grebe-ipc-ctrl` を読んで `ring_desc`/`active_config`/`generation` を取得
+- `grebe-ipc-cons` を初期化 (`credits_granted` 設定)
+- DataRingV2 attach
+
+3. 異常/復帰:
+- child モード: プロセス終了検知で degraded
+- attach モード: heartbeat timeout で degraded
+- generation 更新検出で reattach
+
+4. cleanup:
+- SG は旧 `grebe-ipc-data-<generation>` を unlink/close
+- Main は旧セグメントを detach し best-effort cleanup
+
+#### 3.3.6 タイムアウト/しきい値 (v2 既定値)
+
+| 項目 | 既定値 |
+|---|---|
+| producer heartbeat 更新周期 | 100 ms |
+| consumer heartbeat 更新周期 | 100 ms |
+| heartbeat timeout 判定 | 500 ms |
+| attach 初期待機タイムアウト | 5 s |
+| block_length_samples | 65536 |
+| slot_count | 64 |
+| 初期 credits_granted | 32 |
+
+### 3.4 標準I/Fとの対応
+
+| 観点 | 本IPC(v2) | 参照パターン |
+|---|---|---|
+| データリング | 固定長 descriptor-like ring | AF_XDP/DPDK |
+| 制御/データ分離 | ControlBlock + DataRing 分離 | Aeron |
+| フロー制御 | credit window | PCIe/NVMe queue depth |
+| 通知 | poll + optional doorbell | NVMe/xHCI |
+| 信頼性 | loss-tolerant realtime + drop accounting | UDP realtime profile |
 
 ---
 
@@ -220,6 +356,50 @@ vulkan-stream-poc/
 - **FR-07.4:** 各チャンネルで独立に間引き処理を行う
 - **FR-07.5:** N=1 のとき従来と同一の動作を保証する（後方互換）
 
+### FR-08: プロセス分離と起動制御
+
+- **FR-08.1:** 可視化メインを `grebe`、信号生成を `grebe-sg` の別実行バイナリとして提供する
+- **FR-08.2:** `grebe` はデフォルトで `grebe-sg` を子プロセスとして自動起動する
+- **FR-08.3:** 既存 `grebe-sg` へ接続する attach モードを提供する
+- **FR-08.4:** `grebe-sg` の停止・再起動を `grebe` が検知し、復帰可能にする
+  - child モード: プロセスハンドル監視（wait/poll）
+  - attach モード: heartbeat timeout 監視
+  - 共有メモリの stale データ判定に generation counter を用いる
+- **FR-08.5:** 可視化UIに信号生成設定UIを持ち込まず、責務分離を維持する
+- **FR-08.6:** Phase 8 で `grebe` + `grebe-sg` の最小E2E動作（接続・表示）を必須とする
+  - production Shared Memory 前でも、stub/暫定 transport で runnable を満たす
+
+### FR-09: SG UI とチャンネル設定モデル
+
+- **FR-09.1:** SG UI は専用ウィンドウで動作する
+- **FR-09.1a:** SG UI 描画バックエンドは `GLFW + OpenGL + ImGui` を採用する（Vulkan は不要）
+- **FR-09.2:** チャンネル数は 1-8 をサポートする
+- **FR-09.3:** サンプルレートはグローバル設定（全チャンネル共通）とする
+- **FR-09.4:** 各チャンネルごとに modulation/waveform を独立設定可能にする
+- **FR-09.5:** data length (block length) は初期実装で全チャンネル共通値とする（固定長フレーミング）
+- **FR-09.6:** 各チャンネル独立の可変 data length は拡張要件として後続フェーズで扱う
+
+### FR-10: トランスポート抽象化と計測
+
+- **FR-10.1:** `grebe-sg` → `grebe` のデータ搬送は抽象 I/F 経由で実装する
+- **FR-10.2:** 初期実装は Shared memory + `memcpy` とする
+- **FR-10.3:** 外部インターフェース帯域/遅延評価のため、将来的な代替バックエンドを差し替え可能にする
+- **FR-10.4:** attach/discovery 用に `ControlBlockV2` (`grebe-ipc-ctrl`) を定義する
+  - `SignalConfigV2`
+  - `DataRingDescV2`
+  - producer heartbeat
+  - generation
+- **FR-10.5:** consumer 状態共有用に `ConsumerStatusBlockV2` (`grebe-ipc-cons`) を定義する
+  - `read_sequence`
+  - `credits_granted`
+  - consumer heartbeat
+- **FR-10.6:** フロー制御は credit-based window を必須とする
+- **FR-10.7:** 信頼性プロファイルは loss-tolerant realtime とし、credit 枯渇時は drop-new とする
+- **FR-10.8:** `FrameHeaderV2` の `header_crc32c` 検証を必須とする
+- **FR-10.9:** 初期実装時点で最低限の transport 指標（throughput, drop rate, enqueue/dequeue, inflight depth, credits utilization）を計測する
+- **FR-10.10:** E2E timestamp delta と `--profile` JSON/CSV 統合は後続フェーズで追加する
+- **FR-10.11:** config 更新は generation bump 経由のみ許可し、in-place config 書き換えは行わない
+
 ---
 
 ## 5. 非機能要件
@@ -254,6 +434,8 @@ vulkan-stream-poc/
 - Ring buffer サイズ: デフォルト 16M samples (32 MB)、1 GSPS 時 64M+ 推奨
 - GPU Staging Buffer: 3面 × 描画頂点数分（数十KB程度）
 - VRAM 総使用量: 512 MB 以下
+- IPC DataRing (v2) は `block_length_samples=65536`, `slot_count=64` を基準とし、
+  8ch 時の payload 領域目安を約 64 MB に制約する（header/管理領域を除く）
 
 ### NFR-04: 安定性
 
@@ -265,6 +447,15 @@ vulkan-stream-poc/
 - Windows (MSVC 2022+) と Linux (GCC 12+ / Clang 15+) でビルド可能
 - 外部依存は CMake FetchContent で解決
 - GPU ベンダー非依存（NVIDIA / AMD / Intel で動作）
+
+### NFR-06: IPC 安定性
+
+- `grebe-sg` の異常終了時、`grebe` はクラッシュせず状態を degraded 表示して待機する
+- `grebe-sg` の再起動後、`grebe` は再接続して描画を再開できる
+- プロセス境界導入後も 1時間連続実行でリーク/ハングがないこと
+- 固定長フレーミングでの共有メモリリングは sequence 欠落を検知できること
+- credit window 制御下で producer/consumer がデッドロックしないこと
+- header CRC 異常を確実に検出し、破損フレームを破棄できること
 
 ---
 
@@ -285,19 +476,19 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 
 ## 7. 操作仕様
 
-PoCのため GUI は最小限とし、キーボード操作を主体とする。
+`grebe` (可視化) と `grebe-sg` (信号生成) の 2 プロセス構成を前提とする。
 
 ### キーボード操作
 
 | キー | 操作 |
 |---|---|
-| `1` - `4` | データレート切替 (1M / 10M / 100M / 1G SPS) |
-| `D` | 間引きアルゴリズム切替 (None / MinMax / LTTB) |
-| `V` | V-Sync ON/OFF トグル |
-| `Space` | 一時停止 / 再開 |
-| `Esc` | 終了 |
+| `1` - `4` | `grebe-sg`: グローバルサンプルレート切替 (1M / 10M / 100M / 1G SPS) |
+| `D` | `grebe`: 間引きアルゴリズム切替 (None / MinMax / LTTB) |
+| `V` | `grebe`: V-Sync ON/OFF トグル |
+| `Space` | `grebe`: 一時停止 / 再開コマンド送信 |
+| `Esc` | フォーカス中プロセスを終了 |
 
-### CLI オプション
+### CLI オプション (`grebe`)
 
 | オプション | 説明 |
 |---|---|
@@ -306,6 +497,18 @@ PoCのため GUI は最小限とし、キーボード操作を主体とする。
 | `--bench` | 独立マイクロベンチマーク実行、JSON 出力 |
 | `--ring-size=<N>[K\|M\|G]` | Ring buffer サイズ指定（デフォルト 16M） |
 | `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
+| `--attach-sg` | `grebe-sg` を自動起動せず既存プロセスへ接続 |
+| `--sg-path=<path>` | 自動起動時に使用する `grebe-sg` 実行ファイルパス |
+| `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
+
+### CLI オプション (`grebe-sg`)
+
+| オプション | 説明 |
+|---|---|
+| `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
+| `--sample-rate=<Hz>` | グローバルサンプルレート初期値 |
+| `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
+| `--segment-name=<name>` | IPC 共有メモリ名 |
 
 ---
 
@@ -330,6 +533,8 @@ PoCのため GUI は最小限とし、キーボード操作を主体とする。
 | Vulkan 初期化の複雑さ | 全体遅延 | **緩和済み**: vk-bootstrap 活用 |
 | GPU ベンダー間の挙動差 | 再現性低下 | **検証済み**: RTX 5080 で複数環境動作確認 |
 | LTTB が高レートで追いつかない | 描画落ち | **対策済み**: ≥100 MSPS で自動無効化 |
+| 親子プロセス管理の複雑化 | 起動失敗/孤児プロセス | **要対策**: spawn/attach 両経路の状態遷移を明文化 |
+| IPC 同期不整合（seq 欠落、再接続） | データ欠損/停止 | **要対策**: sequence + timestamp + timeout/reconnect |
 
 ---
 

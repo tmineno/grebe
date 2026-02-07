@@ -61,6 +61,51 @@
 
 ---
 
+## 次期マイルストーン（実装予定）
+
+### Phase 8: 実行バイナリ分離 (`grebe` / `grebe-sg`)
+
+- [ ] `grebe` (可視化メイン) と `grebe-sg` (信号生成) の 2 実行バイナリ化
+- [ ] 共通契約（`SignalConfigV2` / `FrameHeaderV2` / transport I/F）を `src/ipc` へ分離
+- [ ] `grebe` から `grebe-sg` 起動制御の基盤を実装
+- [ ] Phase 8 完了時点で最小E2E動作を満たす暫定 transport（stub/pipe/最小shm のいずれか）を実装
+
+### Phase 9: 起動モードと Shared Memory 基盤
+
+- [ ] デフォルト: `grebe` が `grebe-sg` を自動起動
+- [ ] `--attach-sg` による既存 `grebe-sg` 接続モード
+- [ ] Shared memory + `memcpy` IPC を実装（初期ベースライン）
+- [ ] ControlBlockV2 (`grebe-ipc-ctrl`) + generation/heartbeat による discovery/recovery
+- [ ] ConsumerStatusBlockV2 (`grebe-ipc-cons`) + credit window 制御
+- [ ] DataRing 固定長 v2 パラメータ（block_length=65536, slots=64）
+- [ ] loss-tolerant realtime 方針 (credit 枯渇時 drop-new)
+- [ ] 基本メトリクス（throughput/drop/enqueue/dequeue/inflight/credits）
+- [ ] FrameHeaderV2 header CRC 検証
+- [ ] `grebe-sg` 再起動時の再接続/復旧を実装
+- [ ] 設定変更は generation bump 経由のみ（in-place config 書き換え禁止）
+- [ ] 世代切替時の旧 shared memory segment cleanup（unlink/close + best-effort detach）
+
+### Phase 10: SG 専用 UI と設定モデル
+
+- [ ] `grebe-sg` 専用ウィンドウ（SG UI）を実装
+- [ ] グローバル sample rate 設定
+- [ ] per-channel (1-8ch) modulation/waveform 設定
+- [ ] v2 は全ch共通 data length 設定（可変 per-channel は後続へ延期）
+- [ ] `grebe` 側 UI を可視化専用に整理（SG 設定責務を除外）
+
+### Phase 11: トランスポート計測とプロファイル統合
+
+- [ ] SG timestamp → grebe render timestamp の E2E delta を計測
+- [ ] `--profile` JSON/CSV に transport メトリクスを追加
+
+### Phase 12: 外部I/F評価向け拡張点
+
+- [ ] トランスポート差し替え可能な抽象I/Fを確定
+- [ ] 帯域制限/遅延注入可能なシミュレータバックエンドを追加
+- [ ] shared_mem ベースラインとの差分比較レポートを整備
+
+---
+
 ## 将来拡張（PoC 後の検討事項）
 
 ### 優先度中
