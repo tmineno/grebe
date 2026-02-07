@@ -20,6 +20,7 @@ struct FrameHeaderV2 {
     uint32_t block_length_samples = 0;  // samples per channel
     uint32_t payload_bytes      = 0;    // = channel_count * block_length_samples * sizeof(int16_t)
     uint32_t header_crc32c      = 0;    // placeholder for Phase 8; real CRC in Phase 10
+    double   sample_rate_hz     = 0.0;  // current sample rate (grebe-sg authoritative)
 };
 
 // =========================================================================

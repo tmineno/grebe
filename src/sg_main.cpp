@@ -62,19 +62,23 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
 static void sender_thread_func(
     std::vector<RingBuffer<int16_t>*>& rings,
     PipeProducer& producer,
+    DataGenerator& data_gen,
     uint32_t num_channels,
+    std::atomic<uint32_t>& block_size_ref,
     std::atomic<bool>& stop_requested)
 {
-    constexpr uint32_t BLOCK_SIZE = 4096;
-    std::vector<int16_t> payload(BLOCK_SIZE * num_channels);
-    std::vector<int16_t> channel_buf(BLOCK_SIZE);
+    constexpr uint32_t MAX_BLOCK = 65536;
+    std::vector<int16_t> payload(MAX_BLOCK * num_channels);
+    std::vector<int16_t> channel_buf(MAX_BLOCK);
     uint64_t sequence = 0;
 
     while (!stop_requested.load(std::memory_order_relaxed)) {
+        uint32_t block_size = block_size_ref.load(std::memory_order_relaxed);
+
         // Check if all channels have enough data
         bool all_ready = true;
         for (uint32_t ch = 0; ch < num_channels; ch++) {
-            if (rings[ch]->size() < BLOCK_SIZE) {
+            if (rings[ch]->size() < block_size) {
                 all_ready = false;
                 break;
             }
@@ -85,10 +89,10 @@ static void sender_thread_func(
             continue;
         }
 
-        // Drain BLOCK_SIZE from each channel and pack channel-major
+        // Drain block_size from each channel and pack channel-major
         for (uint32_t ch = 0; ch < num_channels; ch++) {
-            size_t popped = rings[ch]->pop_bulk(channel_buf.data(), BLOCK_SIZE);
-            size_t offset = static_cast<size_t>(ch) * BLOCK_SIZE;
+            size_t popped = rings[ch]->pop_bulk(channel_buf.data(), block_size);
+            size_t offset = static_cast<size_t>(ch) * block_size;
             std::memcpy(payload.data() + offset, channel_buf.data(), popped * sizeof(int16_t));
         }
 
@@ -101,8 +105,9 @@ static void sender_thread_func(
         header.sequence = sequence++;
         header.producer_ts_ns = static_cast<uint64_t>(ns);
         header.channel_count = num_channels;
-        header.block_length_samples = BLOCK_SIZE;
-        header.payload_bytes = num_channels * BLOCK_SIZE * sizeof(int16_t);
+        header.block_length_samples = block_size;
+        header.payload_bytes = num_channels * block_size * sizeof(int16_t);
+        header.sample_rate_hz = data_gen.target_sample_rate();
 
         if (!producer.send_frame(header, payload.data())) {
             spdlog::info("grebe-sg: pipe closed, stopping sender");
@@ -222,10 +227,13 @@ int main(int argc, char* argv[]) {
 
     // Start threads
     std::atomic<bool> stop_requested{false};
+    std::atomic<uint32_t> block_size{4096};
 
     std::thread sender(sender_thread_func,
                        std::ref(ring_ptrs), std::ref(producer),
-                       opts.num_channels, std::ref(stop_requested));
+                       std::ref(data_gen),
+                       opts.num_channels, std::ref(block_size),
+                       std::ref(stop_requested));
 
     std::thread cmd_reader(command_reader_func,
                            std::ref(producer), std::ref(data_gen),

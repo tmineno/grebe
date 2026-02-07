@@ -29,18 +29,29 @@
 #include <thread>
 #include <vector>
 
-// IPC receiver thread: reads frames from pipe and pushes to local ring buffers
+// IPC receiver thread: reads frames from pipe and pushes to local ring buffers.
+// Updates sample rate tracking so grebe's decimation thread and HUD stay in sync.
 static void ipc_receiver_func(ITransportConsumer& consumer,
                                std::vector<RingBuffer<int16_t>*>& rings,
                                uint32_t num_channels,
-                               std::atomic<bool>& stop) {
+                               std::atomic<bool>& stop,
+                               std::atomic<double>& sample_rate_out,
+                               DecimationThread& dec_thread) {
     FrameHeaderV2 hdr{};
     std::vector<int16_t> payload;
+    double last_rate = 0.0;
 
     while (!stop.load(std::memory_order_relaxed)) {
         if (!consumer.receive_frame(hdr, payload)) {
             spdlog::info("IPC receiver: pipe closed");
             break;
+        }
+
+        // Sync sample rate from grebe-sg
+        if (hdr.sample_rate_hz > 0.0 && hdr.sample_rate_hz != last_rate) {
+            last_rate = hdr.sample_rate_hz;
+            sample_rate_out.store(last_rate, std::memory_order_relaxed);
+            dec_thread.set_sample_rate(last_rate);
         }
 
         uint32_t ch_count = std::min(hdr.channel_count, num_channels);
@@ -184,13 +195,7 @@ int main(int argc, char* argv[]) {
             spdlog::info("IPC mode: spawned grebe-sg PID {}", sg_process->pid());
 
             pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
-
-            // Start receiver thread
-            ipc_receiver_thread = std::thread(ipc_receiver_func,
-                                              std::ref(*pipe_consumer),
-                                              std::ref(ring_ptrs),
-                                              opts.num_channels,
-                                              std::ref(ipc_receiver_stop));
+            // Receiver thread launched after dec_thread & app are ready
         }
 
         // =====================================================================
@@ -239,8 +244,19 @@ int main(int argc, char* argv[]) {
         app.num_channels = opts.num_channels;
         app.enable_profile = opts.enable_profile;
         app.transport = pipe_consumer.get();  // nullptr in embedded mode
-        app.current_sample_rate = 1e6;
-        app.current_paused = false;
+        app.current_sample_rate.store(1e6, std::memory_order_relaxed);
+        app.current_paused.store(false, std::memory_order_relaxed);
+
+        // Start IPC receiver after dec_thread and app are ready
+        if (pipe_consumer) {
+            ipc_receiver_thread = std::thread(ipc_receiver_func,
+                                              std::ref(*pipe_consumer),
+                                              std::ref(ring_ptrs),
+                                              opts.num_channels,
+                                              std::ref(ipc_receiver_stop),
+                                              std::ref(app.current_sample_rate),
+                                              std::ref(dec_thread));
+        }
 
         run_main_loop(app);
 

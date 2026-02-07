@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -34,8 +35,8 @@ struct AppComponents {
     bool enable_profile;
     // IPC mode fields (non-null when not embedded)
     ITransportConsumer* transport = nullptr;
-    double current_sample_rate = 1e6;
-    bool   current_paused = false;
+    std::atomic<double> current_sample_rate{1e6};   // updated by receiver thread in IPC mode
+    std::atomic<bool>   current_paused{false};
 };
 
 void run_main_loop(AppComponents& app);

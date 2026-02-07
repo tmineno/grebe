@@ -66,18 +66,18 @@ static void process_commands(AppComponents& app) {
                     app.transport->send_command(ipc);
                 }
                 app.dec_thread->set_sample_rate(c.rate);
-                app.current_sample_rate = c.rate;
+                app.current_sample_rate.store(c.rate, std::memory_order_relaxed);
             } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
                 app.dec_thread->cycle_mode();
             } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
                 if (app.data_gen) {
                     app.data_gen->set_paused(!app.data_gen->is_paused());
-                    app.current_paused = app.data_gen->is_paused();
+                    app.current_paused.store(app.data_gen->is_paused(), std::memory_order_relaxed);
                 } else if (app.transport) {
                     IpcCommand ipc{};
                     ipc.type = IpcCommand::TOGGLE_PAUSED;
                     app.transport->send_command(ipc);
-                    app.current_paused = !app.current_paused;
+                    app.current_paused.store(!app.current_paused.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 }
             } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
                 int w, h;
@@ -181,13 +181,13 @@ void run_main_loop(AppComponents& app) {
         app.benchmark->set_decimation_time(app.dec_thread->decimation_time_ms());
         app.benchmark->set_decimation_ratio(app.dec_thread->decimation_ratio());
 
-        // Data rate: from DataGenerator (embedded) or local tracking (IPC)
+        // Data rate: from DataGenerator (embedded) or atomic updated by receiver (IPC)
         double data_rate = app.data_gen
             ? app.data_gen->actual_sample_rate()
-            : app.current_sample_rate;
+            : app.current_sample_rate.load(std::memory_order_relaxed);
         bool paused = app.data_gen
             ? app.data_gen->is_paused()
-            : app.current_paused;
+            : app.current_paused.load(std::memory_order_relaxed);
 
         app.benchmark->set_data_rate(data_rate);
         app.benchmark->set_ring_fill(app.dec_thread->ring_fill_ratio());
