@@ -1,5 +1,6 @@
 #include "app_loop.h"
 #include "app_command.h"
+#include "drop_counter.h"
 #include "vulkan_context.h"
 #include "swapchain.h"
 #include "renderer.h"
@@ -185,6 +186,12 @@ void run_main_loop(AppComponents& app) {
             first_vtx += per_ch_vtx;
         }
 
+        // Compute total drops across all channels
+        uint64_t total_drops = 0;
+        for (auto* dc : app.drop_counters) {
+            if (dc) total_drops += dc->total_dropped();
+        }
+
         // Build ImGui frame
         app.hud->new_frame();
         app.hud->build_status_bar(*app.benchmark, app.data_gen->actual_sample_rate(),
@@ -192,7 +199,8 @@ void run_main_loop(AppComponents& app) {
                                   app.buf_mgr->vertex_count(),
                                   app.data_gen->is_paused(),
                                   app.dec_thread->effective_mode(),
-                                  app.num_channels);
+                                  app.num_channels,
+                                  total_drops);
 
         // Render (timed)
         t0 = Benchmark::now();

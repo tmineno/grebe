@@ -1,4 +1,5 @@
 #include "data_generator.h"
+#include "drop_counter.h"
 
 #ifdef _MSC_VER
 #define _USE_MATH_DEFINES
@@ -101,6 +102,10 @@ void DataGenerator::stop() {
         thread_.join();
     }
     running_.store(false, std::memory_order_release);
+}
+
+void DataGenerator::set_drop_counters(std::vector<DropCounter*> counters) {
+    drop_counters_ = std::move(counters);
 }
 
 void DataGenerator::set_sample_rate(double rate) {
@@ -231,7 +236,10 @@ void DataGenerator::thread_func() {
                     cs.period_pos += chunk;
                     if (cs.period_pos >= cs.period_len) cs.period_pos = 0;
                 }
-                ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
+                size_t pushed = ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
+                if (ch < drop_counters_.size() && drop_counters_[ch]) {
+                    drop_counters_[ch]->record_push(batch_size, pushed);
+                }
             }
         } else {
             // Low-rate or chirp: per-sample LUT generation (channel 0 only uses phase_acc)
@@ -286,7 +294,10 @@ void DataGenerator::thread_func() {
                     break;
                 }
 
-                ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
+                size_t pushed = ring_buffers_[ch]->push_bulk(batch.data(), batch_size);
+                if (ch < drop_counters_.size() && drop_counters_[ch]) {
+                    drop_counters_[ch]->record_push(batch_size, pushed);
+                }
             }
 
             // Advance the base phase accumulator (channel 0's amount)

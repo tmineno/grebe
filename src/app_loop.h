@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 struct GLFWwindow;
 class AppCommandQueue;
@@ -13,6 +14,7 @@ class DataGenerator;
 class DecimationThread;
 class Benchmark;
 class ProfileRunner;
+class DropCounter;
 
 struct AppComponents {
     GLFWwindow* window;
@@ -26,6 +28,7 @@ struct AppComponents {
     DecimationThread* dec_thread;
     Benchmark* benchmark;
     ProfileRunner* profiler;
+    std::vector<DropCounter*> drop_counters;
     uint32_t num_channels;
     bool enable_profile;
 };

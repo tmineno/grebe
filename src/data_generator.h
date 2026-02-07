@@ -8,6 +8,8 @@
 #include <thread>
 #include <atomic>
 
+class DropCounter;
+
 enum class WaveformType {
     Sine,
     Square,
@@ -46,6 +48,8 @@ public:
     double actual_sample_rate() const { return actual_rate_.load(std::memory_order_relaxed); }
     uint64_t total_samples_generated() const { return total_samples_.load(std::memory_order_relaxed); }
 
+    void set_drop_counters(std::vector<DropCounter*> counters);
+
 private:
     void thread_func();
     void rebuild_period_buffer(double sample_rate, double frequency, WaveformType type);
@@ -65,6 +69,7 @@ private:
     WaveformType cached_type_ = WaveformType::Sine;
 
     std::vector<RingBuffer<int16_t>*> ring_buffers_;
+    std::vector<DropCounter*> drop_counters_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

@@ -1,6 +1,7 @@
 #include "app_command.h"
 #include "app_loop.h"
 #include "cli.h"
+#include "drop_counter.h"
 #include "vulkan_context.h"
 #include "swapchain.h"
 #include "renderer.h"
@@ -101,7 +102,16 @@ int main(int argc, char* argv[]) {
                      opts.num_channels, opts.ring_size,
                      opts.ring_size * 2 / (1024 * 1024));
 
+        // Per-channel drop counters
+        std::vector<std::unique_ptr<DropCounter>> drop_counters;
+        std::vector<DropCounter*> drop_ptrs;
+        for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
+            drop_counters.push_back(std::make_unique<DropCounter>());
+            drop_ptrs.push_back(drop_counters.back().get());
+        }
+
         DataGenerator data_gen;
+        data_gen.set_drop_counters(drop_ptrs);
         data_gen.start(ring_ptrs, 1'000'000.0, WaveformType::Sine);
 
         constexpr uint32_t DECIMATE_TARGET = 1920 * 2;
@@ -141,6 +151,7 @@ int main(int argc, char* argv[]) {
         app.dec_thread = &dec_thread;
         app.benchmark = &benchmark;
         app.profiler = &profiler;
+        app.drop_counters = drop_ptrs;
         app.num_channels = opts.num_channels;
         app.enable_profile = opts.enable_profile;
 
