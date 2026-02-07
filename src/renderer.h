@@ -16,6 +16,7 @@ struct WaveformPushConstants {
     float horizontal_scale  = 1.0f;
     float horizontal_offset = 0.0f;
     int   vertex_count      = 0;
+    int   first_vertex      = 0;
     float color_r           = 0.0f;
     float color_g           = 1.0f;
     float color_b           = 0.0f;

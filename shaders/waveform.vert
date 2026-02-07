@@ -8,6 +8,7 @@ layout(push_constant) uniform PushConstants {
     float horizontal_scale;
     float horizontal_offset;
     int   vertex_count;
+    int   first_vertex;
     float color_r;
     float color_g;
     float color_b;
@@ -17,8 +18,8 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 vColor;
 
 void main() {
-    // X: spread vertices across [-1, 1] based on index and vertex count
-    float x = (float(gl_VertexIndex) / float(pc.vertex_count - 1)) * 2.0 - 1.0;
+    // X: spread vertices across [-1, 1] based on local index and vertex count
+    float x = (float(gl_VertexIndex - pc.first_vertex) / float(pc.vertex_count - 1)) * 2.0 - 1.0;
     x = x * pc.horizontal_scale + pc.horizontal_offset;
 
     // Y: normalize int16 [-32768, 32767] to [-1, 1], then apply scale and offset

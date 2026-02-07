@@ -333,10 +333,13 @@ int main(int argc, char* argv[]) {
 
             benchmark.set_vertex_count(buf_mgr.vertex_count());
 
-            // Update per-channel vertex counts from decimation thread
+            // Update per-channel vertex counts and first_vertex offsets
             uint32_t per_ch_vtx = dec_thread.per_channel_vertex_count();
+            uint32_t first_vtx = 0;
             for (uint32_t ch = 0; ch < num_channels; ch++) {
                 channel_pcs[ch].vertex_count = static_cast<int>(per_ch_vtx);
+                channel_pcs[ch].first_vertex = static_cast<int>(first_vtx);
+                first_vtx += per_ch_vtx;
             }
 
             // Build ImGui frame
