@@ -271,6 +271,27 @@ else()
 endif()
 
 # =============================================================================
+# Signal generator executable (grebe-sg)
+# =============================================================================
+
+add_executable(grebe-sg
+    src/sg_main.cpp
+)
+
+target_link_libraries(grebe-sg PRIVATE
+    grebe_common
+    glfw
+    imgui_opengl_lib
+    OpenGL::GL
+)
+
+if(MSVC)
+    target_compile_options(grebe-sg PRIVATE /W4)
+else()
+    target_compile_options(grebe-sg PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# =============================================================================
 # Convenience targets (Linux)
 # =============================================================================
 
