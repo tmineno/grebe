@@ -19,6 +19,11 @@ DataGenerator::DataGenerator() {
         double phase = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(SINE_LUT_SIZE);
         sine_lut_[i] = static_cast<int16_t>(std::sin(phase) * 32767.0);
     }
+    // Initialize per-channel waveforms to Sine
+    for (auto& cw : channel_waveforms_) {
+        cw.store(WaveformType::Sine, std::memory_order_relaxed);
+    }
+    cached_types_.fill(WaveformType::Sine);
 }
 
 std::vector<int16_t> DataGenerator::generate_static(WaveformType type, uint32_t num_samples,
@@ -87,6 +92,9 @@ void DataGenerator::start(std::vector<RingBuffer<int16_t>*> ring_buffers, double
     ring_buffers_ = std::move(ring_buffers);
     target_sample_rate_.store(sample_rate, std::memory_order_relaxed);
     waveform_type_.store(type, std::memory_order_relaxed);
+    for (auto& cw : channel_waveforms_) {
+        cw.store(type, std::memory_order_relaxed);
+    }
     stop_requested_.store(false, std::memory_order_relaxed);
     paused_.store(false, std::memory_order_relaxed);
     total_samples_.store(0, std::memory_order_relaxed);
@@ -114,42 +122,57 @@ void DataGenerator::set_sample_rate(double rate) {
 
 void DataGenerator::set_waveform_type(WaveformType type) {
     waveform_type_.store(type, std::memory_order_relaxed);
+    for (auto& cw : channel_waveforms_) {
+        cw.store(type, std::memory_order_relaxed);
+    }
+}
+
+void DataGenerator::set_channel_waveform(uint32_t ch, WaveformType type) {
+    if (ch < MAX_CHANNELS) {
+        channel_waveforms_[ch].store(type, std::memory_order_relaxed);
+    }
+}
+
+WaveformType DataGenerator::get_channel_waveform(uint32_t ch) const {
+    if (ch < MAX_CHANNELS) {
+        return channel_waveforms_[ch].load(std::memory_order_relaxed);
+    }
+    return WaveformType::Sine;
 }
 
 void DataGenerator::set_paused(bool paused) {
     paused_.store(paused, std::memory_order_relaxed);
 }
 
-void DataGenerator::rebuild_period_buffer(double sample_rate, double frequency, WaveformType type) {
+void DataGenerator::rebuild_period_buffer(double sample_rate, double frequency) {
     size_t num_channels = ring_buffers_.size();
     channel_states_.resize(num_channels);
 
-    if (type == WaveformType::WhiteNoise) {
-        constexpr size_t NOISE_BUF_SIZE = 1'048'576;
-        for (size_t ch = 0; ch < num_channels; ch++) {
-            auto& cs = channel_states_[ch];
+    size_t period_len = std::max(size_t(1), static_cast<size_t>(std::round(sample_rate / frequency)));
+    constexpr size_t NOISE_BUF_SIZE = 1'048'576;
+
+    for (size_t ch = 0; ch < num_channels; ch++) {
+        auto& cs = channel_states_[ch];
+        WaveformType ch_type = channel_waveforms_[ch].load(std::memory_order_relaxed);
+        cached_types_[ch] = ch_type;
+
+        if (ch_type == WaveformType::WhiteNoise) {
             cs.period_len = NOISE_BUF_SIZE;
             cs.period_buf.resize(NOISE_BUF_SIZE);
-            std::mt19937 rng(42 + static_cast<uint32_t>(ch)); // different seed per channel
+            std::mt19937 rng(42 + static_cast<uint32_t>(ch));
             std::uniform_int_distribution<int> dist(-32768, 32767);
             for (size_t i = 0; i < NOISE_BUF_SIZE; i++) {
                 cs.period_buf[i] = static_cast<int16_t>(dist(rng));
             }
-            cs.period_pos = 0;
-        }
-    } else {
-        size_t period_len = std::max(size_t(1), static_cast<size_t>(std::round(sample_rate / frequency)));
-        for (size_t ch = 0; ch < num_channels; ch++) {
-            auto& cs = channel_states_[ch];
+        } else {
             cs.period_len = period_len;
             cs.period_buf.resize(period_len);
 
-            // Per-channel phase offset for visual differentiation
             double ch_phase_offset = M_PI * static_cast<double>(ch) / static_cast<double>(num_channels);
 
             for (size_t i = 0; i < period_len; i++) {
                 double phase = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(period_len) + ch_phase_offset;
-                switch (type) {
+                switch (ch_type) {
                 case WaveformType::Sine:
                     cs.period_buf[i] = static_cast<int16_t>(std::sin(phase) * 32767.0);
                     break;
@@ -167,13 +190,12 @@ void DataGenerator::rebuild_period_buffer(double sample_rate, double frequency, 
                     break;
                 }
             }
-            cs.period_pos = 0;
         }
+        cs.period_pos = 0;
     }
 
     cached_sample_rate_ = sample_rate;
     cached_frequency_ = frequency;
-    cached_type_ = type;
 }
 
 void DataGenerator::thread_func() {
@@ -206,21 +228,39 @@ void DataGenerator::thread_func() {
         }
 
         double sample_rate = target_sample_rate_.load(std::memory_order_relaxed);
-        WaveformType type = waveform_type_.load(std::memory_order_relaxed);
         bool high_rate = (sample_rate >= 100e6);
         size_t batch_size = high_rate ? BATCH_SIZE_HIGH : BATCH_SIZE_LOW;
 
         // Scale frequency so ~3 cycles are visible per frame at 60 FPS
         double frequency = std::max(180.0, 3.0 * sample_rate / 1'000'000.0);
 
-        // High-rate periodic waveforms: use memcpy period tiling
-        bool use_tiling = high_rate && type != WaveformType::Chirp;
+        // Read per-channel waveform types
         size_t num_channels = ring_buffers_.size();
+
+        // Check if any channel has Chirp (cannot tile Chirp)
+        bool any_chirp = false;
+        for (size_t ch = 0; ch < num_channels; ch++) {
+            if (channel_waveforms_[ch].load(std::memory_order_relaxed) == WaveformType::Chirp) {
+                any_chirp = true;
+                break;
+            }
+        }
+
+        bool use_tiling = high_rate && !any_chirp;
 
         if (use_tiling) {
             // Rebuild period buffer if parameters changed
-            if (sample_rate != cached_sample_rate_ || frequency != cached_frequency_ || type != cached_type_) {
-                rebuild_period_buffer(sample_rate, frequency, type);
+            bool need_rebuild = (sample_rate != cached_sample_rate_ || frequency != cached_frequency_);
+            if (!need_rebuild) {
+                for (size_t ch = 0; ch < num_channels; ch++) {
+                    if (channel_waveforms_[ch].load(std::memory_order_relaxed) != cached_types_[ch]) {
+                        need_rebuild = true;
+                        break;
+                    }
+                }
+            }
+            if (need_rebuild) {
+                rebuild_period_buffer(sample_rate, frequency);
             }
 
             // Fill batch by tiling per-channel period buffer
@@ -242,15 +282,15 @@ void DataGenerator::thread_func() {
                 }
             }
         } else {
-            // Low-rate or chirp: per-sample LUT generation (channel 0 only uses phase_acc)
+            // Low-rate or chirp: per-sample LUT generation
             double lut_increment = frequency * static_cast<double>(SINE_LUT_SIZE) / sample_rate;
 
-            // Generate and push for each channel
             for (size_t ch = 0; ch < num_channels; ch++) {
                 double ch_phase_offset = static_cast<double>(SINE_LUT_SIZE) * 0.5 * static_cast<double>(ch) / static_cast<double>(num_channels);
                 double ch_phase = phase_acc + ch_phase_offset;
+                WaveformType ch_type = channel_waveforms_[ch].load(std::memory_order_relaxed);
 
-                switch (type) {
+                switch (ch_type) {
                 case WaveformType::Sine:
                     for (size_t i = 0; i < batch_size; i++) {
                         size_t idx = static_cast<size_t>(ch_phase) & (SINE_LUT_SIZE - 1);
