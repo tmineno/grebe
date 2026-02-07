@@ -179,56 +179,72 @@ endforeach()
 add_custom_target(compile_shaders DEPENDS ${SHADER_SPIRV_FILES})
 
 # =============================================================================
+# Common library (shared between grebe and future grebe-sg)
+# =============================================================================
+
+add_library(grebe_common STATIC
+    src/app_command.cpp
+    src/cli.cpp
+    src/benchmark.cpp
+    src/decimator.cpp
+    src/data_generator.cpp
+    src/decimation_thread.cpp
+    src/profiler.cpp
+)
+
+target_include_directories(grebe_common PUBLIC ${CMAKE_SOURCE_DIR}/src)
+
+target_link_libraries(grebe_common PUBLIC
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+)
+
+if(MSVC)
+    target_compile_options(grebe_common PRIVATE /W4)
+else()
+    target_compile_options(grebe_common PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# =============================================================================
 # Main executable
 # =============================================================================
 
-add_executable(${PROJECT_NAME}
+add_executable(grebe
     src/main.cpp
-    src/app_command.cpp
     src/app_loop.cpp
-    src/cli.cpp
     src/vulkan_context.cpp
     src/swapchain.cpp
     src/renderer.cpp
     src/buffer_manager.cpp
-    src/data_generator.cpp
-    src/decimator.cpp
-    src/decimation_thread.cpp
-    src/benchmark.cpp
     src/hud.cpp
-    src/profiler.cpp
     src/microbench.cpp
     src/compute_decimator.cpp
     src/vma_impl.cpp
 )
 
-add_dependencies(${PROJECT_NAME} compile_shaders)
+add_dependencies(grebe compile_shaders)
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE
+target_link_libraries(grebe PRIVATE
+    grebe_common
     Vulkan::Vulkan
     glfw
     vk-bootstrap::vk-bootstrap
     GPUOpen::VulkanMemoryAllocator
     glm::glm
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
     stb_headers
     imgui_lib
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE
+target_compile_definitions(grebe PRIVATE
     SHADER_DIR="${SHADER_BINARY_DIR}"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE
 )
 
-# Platform-specific settings
 if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
+    target_compile_options(grebe PRIVATE /W4)
 else()
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(grebe PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # =============================================================================
@@ -236,24 +252,24 @@ endif()
 # =============================================================================
 
 add_custom_target(run
-    COMMAND $<TARGET_FILE:${PROJECT_NAME}>
-    DEPENDS ${PROJECT_NAME}
+    COMMAND $<TARGET_FILE:grebe>
+    DEPENDS grebe
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
-    COMMENT "Running ${PROJECT_NAME}"
+    COMMENT "Running grebe"
 )
 
 add_custom_target(profile
-    COMMAND $<TARGET_FILE:${PROJECT_NAME}> --profile --ring-size=64M
-    DEPENDS ${PROJECT_NAME}
+    COMMAND $<TARGET_FILE:grebe> --profile --ring-size=64M
+    DEPENDS grebe
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
     COMMENT "Running profile"
 )
 
 add_custom_target(bench
-    COMMAND $<TARGET_FILE:${PROJECT_NAME}> --bench
-    DEPENDS ${PROJECT_NAME}
+    COMMAND $<TARGET_FILE:grebe> --bench
+    DEPENDS grebe
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
     COMMENT "Running microbenchmarks"
