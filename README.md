@@ -1,6 +1,8 @@
 # Grebe
 
-High-speed time-series data stream visualization using Vulkan.
+**Proof of Concept** — High-speed time-series data stream visualization using Vulkan.
+
+Explores the performance limits of a Vulkan-based rendering pipeline for 16-bit / 1 GSPS class ADC data visualization. Measures throughput and bottlenecks at each pipeline stage (data generation, decimation, GPU transfer, draw).
 
 ## Prerequisites
 
@@ -24,15 +26,34 @@ data_generator (thread) → ring_buffer (SPSC) → decimation_thread → buffer_
 
 ## Build
 
+### Using CMake Presets (recommended)
+
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
+# Linux
+cmake --workflow --preset linux-release
+
+# Windows native (from WSL2, requires VS2022 + Vulkan SDK on Windows)
+cmake --workflow --preset windows-release
+```
+
+### Manual
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
 ## Run
 
 ```bash
-./build/vulkan-stream-poc
+# Linux
+cmake --build --preset linux-release --target run
+
+# Windows (from WSL2)
+cmake --build --preset windows-release --target run
+
+# Or directly
+./build/release/vulkan-stream-poc
 ```
 
 ## Controls
@@ -52,52 +73,39 @@ cmake --build build
 
 ```bash
 # Normal interactive mode
-./build/vulkan-stream-poc
+./build/release/vulkan-stream-poc
+
+# Multi-channel (1-8 channels)
+./build/release/vulkan-stream-poc --channels=4
 
 # Enable CSV telemetry logging to ./tmp/
-./build/vulkan-stream-poc --log
+./build/release/vulkan-stream-poc --log
 
 # Run automated profiling (headless benchmark), outputs JSON report to ./tmp/
-./build/vulkan-stream-poc --profile
+./build/release/vulkan-stream-poc --profile
 
 # Run profiling with larger ring buffer (needed for 1 GSPS)
-./build/vulkan-stream-poc --profile --ring-size=64M
+./build/release/vulkan-stream-poc --profile --ring-size=64M
 
 # Run isolated microbenchmarks (BM-A through BM-E), outputs JSON to ./tmp/
-./build/vulkan-stream-poc --bench
+./build/release/vulkan-stream-poc --bench
 ```
 
-## Profile Report
+## Benchmarks
 
-`--profile` runs four scenarios (1 MSPS, 10 MSPS, 100 MSPS, 1 GSPS) with 120 warmup frames and 300 measurement frames each. Results are written to `./tmp/profile_<timestamp>.json`.
+Convenience targets for profiling and benchmarks:
 
-Each scenario reports statistics (avg, min, max, p50, p95, p99) for:
+```bash
+cmake --build --preset linux-release --target profile
+cmake --build --preset linux-release --target bench
+```
 
-| Metric | Description |
-|---|---|
-| `fps` | Frames per second |
-| `frame_ms` | Total frame time (ms) |
-| `drain_ms` | Ring buffer drain time (ms) |
-| `decimate_ms` | Decimation processing time (ms) |
-| `upload_ms` | GPU buffer upload time (ms) |
-| `swap_ms` | Double-buffer swap time (ms) |
-| `render_ms` | Vulkan render + present time (ms) |
-| `samples_per_frame` | Raw samples consumed per frame |
-| `vertex_count` | Vertices sent to GPU per frame |
-| `data_rate` | Effective data rate (samples/sec) |
-| `ring_fill` | Ring buffer fill ratio (0.0–1.0) |
+## Documentation
 
-Each scenario passes if `fps.avg >= 30`. The process exits with code 0 if all scenarios pass, 1 otherwise.
+- [doc/RDD.md](doc/RDD.md) — Requirements and specification
+- [doc/technical_judgment.md](doc/technical_judgment.md) — Technical investigation notes (TI-01 through TI-06)
+- [doc/TODO.md](doc/TODO.md) — Milestones and future work
 
-## Microbenchmarks
+## License
 
-`--bench` runs isolated benchmarks and writes results to `./tmp/bench_<timestamp>.json`:
-
-| Benchmark | Description |
-|---|---|
-| BM-A | CPU-to-GPU transfer throughput (vkCmdCopyBuffer) at 1/4/16/64 MB |
-| BM-B | Decimation throughput: MinMax (scalar), MinMax (SIMD/SSE2), LTTB |
-| BM-C | GPU draw throughput (V-Sync OFF) at various vertex counts |
-| BM-E | GPU compute shader MinMax decimation (TI-03 experiment) |
-
-See [doc/RDD.md](doc/RDD.md) for full specification.
+MIT
