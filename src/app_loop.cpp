@@ -23,6 +23,7 @@ static bool g_framebuffer_resized = false;
 
 struct AppState {
     AppCommandQueue* cmd_queue = nullptr;
+    bool is_ipc_mode = false;
 };
 
 static void framebuffer_resize_callback(GLFWwindow* /*window*/, int /*width*/, int /*height*/) {
@@ -41,11 +42,21 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
     case GLFW_KEY_ESCAPE:  q.push(CmdQuit{});                   break;
     case GLFW_KEY_V:       q.push(CmdToggleVsync{});            break;
     case GLFW_KEY_D:       q.push(CmdCycleDecimationMode{});    break;
-    case GLFW_KEY_1:       q.push(CmdSetSampleRate{1e6});       break;
-    case GLFW_KEY_2:       q.push(CmdSetSampleRate{10e6});      break;
-    case GLFW_KEY_3:       q.push(CmdSetSampleRate{100e6});     break;
-    case GLFW_KEY_4:       q.push(CmdSetSampleRate{1e9});       break;
-    case GLFW_KEY_SPACE:   q.push(CmdTogglePaused{});           break;
+    case GLFW_KEY_1:
+    case GLFW_KEY_2:
+    case GLFW_KEY_3:
+    case GLFW_KEY_4:
+        // IPC mode: rate is controlled by grebe-sg UI
+        if (!state->is_ipc_mode) {
+            const double rates[] = {1e6, 10e6, 100e6, 1e9};
+            q.push(CmdSetSampleRate{rates[key - GLFW_KEY_1]});
+        }
+        break;
+    case GLFW_KEY_SPACE:
+        if (!state->is_ipc_mode) {
+            q.push(CmdTogglePaused{});
+        }
+        break;
     default: break;
     }
 }
@@ -101,6 +112,7 @@ void run_main_loop(AppComponents& app) {
     // Register GLFW callbacks
     AppState app_state;
     app_state.cmd_queue = app.cmd_queue;
+    app_state.is_ipc_mode = (app.transport != nullptr);
     glfwSetWindowUserPointer(app.window, &app_state);
     glfwSetFramebufferSizeCallback(app.window, framebuffer_resize_callback);
     glfwSetKeyCallback(app.window, key_callback);
