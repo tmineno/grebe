@@ -21,6 +21,13 @@ public:
     // args: command-line arguments (excluding argv[0])
     bool spawn(const std::string& exe, const std::vector<std::string>& args = {});
 
+    // Spawn with stdin/stdout pipe redirection.
+    // On success, child_stdin_write_fd receives a writable fd connected to child's stdin,
+    // and child_stdout_read_fd receives a readable fd connected to child's stdout.
+    // Caller owns both fds and must close them when done.
+    bool spawn_with_pipes(const std::string& exe, const std::vector<std::string>& args,
+                          int& child_stdin_write_fd, int& child_stdout_read_fd);
+
     // Check if the child is still running.
     bool is_alive() const;
 

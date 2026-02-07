@@ -1,0 +1,150 @@
+#include "pipe_transport.h"
+
+#include <spdlog/spdlog.h>
+
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#else
+#include <cerrno>
+#include <cstring>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
+// =========================================================================
+// Helpers: read/write all bytes (handles partial read/write)
+// =========================================================================
+
+namespace {
+
+bool write_all(int fd, const void* buf, size_t len) {
+    const char* p = static_cast<const char*>(buf);
+    while (len > 0) {
+#ifdef _WIN32
+        int n = _write(fd, p, static_cast<unsigned int>(len));
+#else
+        ssize_t n = ::write(fd, p, len);
+#endif
+        if (n <= 0) return false;
+        p += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool read_all(int fd, void* buf, size_t len) {
+    char* p = static_cast<char*>(buf);
+    while (len > 0) {
+#ifdef _WIN32
+        int n = _read(fd, p, static_cast<unsigned int>(len));
+#else
+        ssize_t n = ::read(fd, p, len);
+#endif
+        if (n <= 0) return false;
+        p += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+} // namespace
+
+// =========================================================================
+// PipeProducer (grebe-sg side)
+// =========================================================================
+
+PipeProducer::PipeProducer()
+#ifdef _WIN32
+    : write_fd_(_fileno(stdout))
+    , read_fd_(_fileno(stdin))
+{
+    _setmode(write_fd_, _O_BINARY);
+    _setmode(read_fd_, _O_BINARY);
+}
+#else
+    : write_fd_(STDOUT_FILENO)
+    , read_fd_(STDIN_FILENO)
+{
+}
+#endif
+
+bool PipeProducer::send_frame(const FrameHeaderV2& header, const void* payload) {
+    if (!write_all(write_fd_, &header, sizeof(header))) return false;
+    if (header.payload_bytes > 0 && payload) {
+        if (!write_all(write_fd_, payload, header.payload_bytes)) return false;
+    }
+    return true;
+}
+
+bool PipeProducer::receive_command(IpcCommand& cmd) {
+#ifdef _WIN32
+    // Non-blocking check not trivially available on Windows pipes;
+    // use a small peek or just try to read with timeout=0.
+    // For Phase 8 stub, use blocking read in a separate thread.
+    // Here we return false (no command) to avoid blocking.
+    (void)cmd;
+    return false;
+#else
+    struct pollfd pfd{};
+    pfd.fd = read_fd_;
+    pfd.events = POLLIN;
+
+    int ret = poll(&pfd, 1, 0);  // non-blocking
+    if (ret <= 0) return false;
+
+    if (!read_all(read_fd_, &cmd, sizeof(cmd))) return false;
+    if (cmd.magic != IPC_COMMAND_MAGIC) {
+        spdlog::warn("PipeProducer: invalid command magic 0x{:08x}", cmd.magic);
+        return false;
+    }
+    return true;
+#endif
+}
+
+// =========================================================================
+// PipeConsumer (grebe side)
+// =========================================================================
+
+PipeConsumer::PipeConsumer(int read_fd, int write_fd)
+    : read_fd_(read_fd)
+    , write_fd_(write_fd)
+{
+#ifdef _WIN32
+    _setmode(read_fd_, _O_BINARY);
+    _setmode(write_fd_, _O_BINARY);
+#endif
+}
+
+PipeConsumer::~PipeConsumer() {
+#ifdef _WIN32
+    if (read_fd_ >= 0) _close(read_fd_);
+    if (write_fd_ >= 0) _close(write_fd_);
+#else
+    if (read_fd_ >= 0) close(read_fd_);
+    if (write_fd_ >= 0) close(write_fd_);
+#endif
+    read_fd_ = -1;
+    write_fd_ = -1;
+}
+
+bool PipeConsumer::receive_frame(FrameHeaderV2& header, std::vector<int16_t>& payload) {
+    if (!read_all(read_fd_, &header, sizeof(header))) return false;
+
+    if (header.magic != FRAME_HEADER_MAGIC) {
+        spdlog::warn("PipeConsumer: invalid frame magic 0x{:08x}", header.magic);
+        return false;
+    }
+
+    if (header.payload_bytes > 0) {
+        payload.resize(header.payload_bytes / sizeof(int16_t));
+        if (!read_all(read_fd_, payload.data(), header.payload_bytes)) return false;
+    } else {
+        payload.clear();
+    }
+    return true;
+}
+
+bool PipeConsumer::send_command(const IpcCommand& cmd) {
+    return write_all(write_fd_, &cmd, sizeof(cmd));
+}

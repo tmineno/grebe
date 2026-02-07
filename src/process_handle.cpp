@@ -152,6 +152,80 @@ void ProcessHandle::terminate() {
     }
 }
 
+bool ProcessHandle::spawn_with_pipes(const std::string& exe, const std::vector<std::string>& args,
+                                     int& child_stdin_write_fd, int& child_stdout_read_fd) {
+    reset();
+    child_stdin_write_fd = -1;
+    child_stdout_read_fd = -1;
+
+    // Create pipes for stdin and stdout
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE stdin_read = nullptr, stdin_write = nullptr;
+    HANDLE stdout_read = nullptr, stdout_write = nullptr;
+
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
+        spdlog::error("ProcessHandle::spawn_with_pipes: CreatePipe(stdin) failed: {}", GetLastError());
+        return false;
+    }
+    // Parent's write end should not be inherited
+    SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+
+    if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
+        spdlog::error("ProcessHandle::spawn_with_pipes: CreatePipe(stdout) failed: {}", GetLastError());
+        CloseHandle(stdin_read);
+        CloseHandle(stdin_write);
+        return false;
+    }
+    // Parent's read end should not be inherited
+    SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+
+    std::string cmd_line = "\"" + exe + "\"";
+    for (const auto& arg : args) {
+        cmd_line += " " + arg;
+    }
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = stdin_read;
+    si.hStdOutput = stdout_write;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+
+    BOOL ok = CreateProcessA(
+        nullptr, cmd_line.data(),
+        nullptr, nullptr,
+        TRUE,  // inherit handles
+        0, nullptr, nullptr,
+        &si, &pi
+    );
+
+    // Close child-side pipe ends in parent
+    CloseHandle(stdin_read);
+    CloseHandle(stdout_write);
+
+    if (!ok) {
+        spdlog::error("ProcessHandle::spawn_with_pipes failed: CreateProcess error {}", GetLastError());
+        CloseHandle(stdin_write);
+        CloseHandle(stdout_read);
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    process_handle_ = pi.hProcess;
+
+    // Convert HANDLEs to CRT file descriptors
+    child_stdin_write_fd = _open_osfhandle(reinterpret_cast<intptr_t>(stdin_write), 0);
+    child_stdout_read_fd = _open_osfhandle(reinterpret_cast<intptr_t>(stdout_read), 0);
+
+    spdlog::info("ProcessHandle: spawned PID {} with pipes ({})", pi.dwProcessId, exe);
+    return true;
+}
+
 uint64_t ProcessHandle::pid() const {
     if (!process_handle_) return 0;
     return static_cast<uint64_t>(GetProcessId(process_handle_));
@@ -233,6 +307,70 @@ void ProcessHandle::terminate() {
     if (pid_ > 0 && !exited_) {
         kill(pid_, SIGTERM);
     }
+}
+
+bool ProcessHandle::spawn_with_pipes(const std::string& exe, const std::vector<std::string>& args,
+                                     int& child_stdin_write_fd, int& child_stdout_read_fd) {
+    reset();
+    child_stdin_write_fd = -1;
+    child_stdout_read_fd = -1;
+
+    int stdin_pipe[2];   // [0]=read (child), [1]=write (parent)
+    int stdout_pipe[2];  // [0]=read (parent), [1]=write (child)
+
+    if (pipe(stdin_pipe) != 0) {
+        spdlog::error("ProcessHandle::spawn_with_pipes: pipe(stdin): {}", std::strerror(errno));
+        return false;
+    }
+    if (pipe(stdout_pipe) != 0) {
+        spdlog::error("ProcessHandle::spawn_with_pipes: pipe(stdout): {}", std::strerror(errno));
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        return false;
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        spdlog::error("ProcessHandle::spawn_with_pipes: fork: {}", std::strerror(errno));
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        return false;
+    }
+
+    if (child == 0) {
+        // Child process
+        close(stdin_pipe[1]);   // close parent's write end
+        close(stdout_pipe[0]);  // close parent's read end
+
+        dup2(stdin_pipe[0], STDIN_FILENO);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+
+        std::vector<const char*> argv;
+        argv.push_back(exe.c_str());
+        for (const auto& a : args) {
+            argv.push_back(a.c_str());
+        }
+        argv.push_back(nullptr);
+
+        execvp(exe.c_str(), const_cast<char* const*>(argv.data()));
+        _exit(127);
+    }
+
+    // Parent process
+    close(stdin_pipe[0]);   // close child's read end
+    close(stdout_pipe[1]);  // close child's write end
+
+    pid_ = child;
+    child_stdin_write_fd = stdin_pipe[1];
+    child_stdout_read_fd = stdout_pipe[0];
+
+    spdlog::info("ProcessHandle: spawned PID {} with pipes ({})", pid_, exe);
+    return true;
 }
 
 uint64_t ProcessHandle::pid() const {
