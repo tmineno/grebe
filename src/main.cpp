@@ -13,16 +13,56 @@
 #include "hud.h"
 #include "profiler.h"
 #include "microbench.h"
+#include "process_handle.h"
+#include "pipe_transport.h"
+#include "contracts.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <ctime>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+// IPC receiver thread: reads frames from pipe and pushes to local ring buffers
+static void ipc_receiver_func(ITransportConsumer& consumer,
+                               std::vector<RingBuffer<int16_t>*>& rings,
+                               uint32_t num_channels,
+                               std::atomic<bool>& stop) {
+    FrameHeaderV2 hdr{};
+    std::vector<int16_t> payload;
+
+    while (!stop.load(std::memory_order_relaxed)) {
+        if (!consumer.receive_frame(hdr, payload)) {
+            spdlog::info("IPC receiver: pipe closed");
+            break;
+        }
+
+        uint32_t ch_count = std::min(hdr.channel_count, num_channels);
+        for (uint32_t ch = 0; ch < ch_count; ch++) {
+            size_t offset = static_cast<size_t>(ch) * hdr.block_length_samples;
+            if (offset + hdr.block_length_samples <= payload.size()) {
+                rings[ch]->push_bulk(payload.data() + offset, hdr.block_length_samples);
+            }
+        }
+    }
+}
+
+// Find the grebe-sg binary next to the grebe binary
+static std::string find_sg_binary(const char* argv0) {
+    std::filesystem::path exe_path(argv0);
+    auto sg_path = exe_path.parent_path() / "grebe-sg";
+    if (std::filesystem::exists(sg_path)) {
+        return sg_path.string();
+    }
+    // Fallback: try PATH
+    return "grebe-sg";
+}
 
 int main(int argc, char* argv[]) {
     try {
@@ -59,7 +99,7 @@ int main(int argc, char* argv[]) {
         Renderer renderer;
         renderer.init(ctx, swapchain, SHADER_DIR);
 
-        // Bench mode: run microbenchmarks and exit
+        // Bench mode: run microbenchmarks and exit (no grebe-sg needed)
         if (opts.enable_bench) {
             swapchain.set_vsync(false);
             swapchain.recreate(ctx, static_cast<uint32_t>(fb_width),
@@ -90,7 +130,9 @@ int main(int argc, char* argv[]) {
         Hud hud;
         hud.init(window, ctx, renderer.render_pass(), swapchain.image_count());
 
-        // Streaming pipeline
+        // =====================================================================
+        // Streaming pipeline: ring buffers (used by both modes)
+        // =====================================================================
         std::vector<std::unique_ptr<RingBuffer<int16_t>>> ring_buffers;
         std::vector<RingBuffer<int16_t>*> ring_ptrs;
         for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
@@ -110,17 +152,57 @@ int main(int argc, char* argv[]) {
             drop_ptrs.push_back(drop_counters.back().get());
         }
 
-        DataGenerator data_gen;
-        data_gen.set_drop_counters(drop_ptrs);
-        data_gen.start(ring_ptrs, 1'000'000.0, WaveformType::Sine);
+        // =====================================================================
+        // Data source: embedded DataGenerator or IPC from grebe-sg
+        // =====================================================================
+        std::unique_ptr<DataGenerator> data_gen;
+        std::unique_ptr<ProcessHandle> sg_process;
+        std::unique_ptr<PipeConsumer> pipe_consumer;
+        std::atomic<bool> ipc_receiver_stop{false};
+        std::thread ipc_receiver_thread;
 
+        if (opts.embedded) {
+            // Embedded mode: DataGenerator in-process (Phase 7 behavior)
+            data_gen = std::make_unique<DataGenerator>();
+            data_gen->set_drop_counters(drop_ptrs);
+            data_gen->start(ring_ptrs, 1'000'000.0, WaveformType::Sine);
+            spdlog::info("Embedded mode: DataGenerator in-process");
+        } else {
+            // IPC mode: spawn grebe-sg
+            std::string sg_path = find_sg_binary(argv[0]);
+            std::vector<std::string> sg_args;
+            sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
+            if (opts.ring_size != 16'777'216) {
+                sg_args.push_back("--ring-size=" + std::to_string(opts.ring_size));
+            }
+
+            sg_process = std::make_unique<ProcessHandle>();
+            int stdin_fd = -1, stdout_fd = -1;
+            if (!sg_process->spawn_with_pipes(sg_path, sg_args, stdin_fd, stdout_fd)) {
+                throw std::runtime_error("Failed to spawn grebe-sg: " + sg_path);
+            }
+            spdlog::info("IPC mode: spawned grebe-sg PID {}", sg_process->pid());
+
+            pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
+
+            // Start receiver thread
+            ipc_receiver_thread = std::thread(ipc_receiver_func,
+                                              std::ref(*pipe_consumer),
+                                              std::ref(ring_ptrs),
+                                              opts.num_channels,
+                                              std::ref(ipc_receiver_stop));
+        }
+
+        // =====================================================================
+        // Decimation thread (reads from ring buffers, same for both modes)
+        // =====================================================================
         constexpr uint32_t DECIMATE_TARGET = 1920 * 2;
         DecimationMode default_mode = DecimationMode::MinMax;
         DecimationThread dec_thread;
         dec_thread.start(ring_ptrs, DECIMATE_TARGET, default_mode);
         dec_thread.set_sample_rate(1'000'000.0);
 
-        spdlog::info("Streaming started: {}ch, 1 MSPS, Sine wave, decimation={}",
+        spdlog::info("Streaming started: {}ch, 1 MSPS, decimation={}",
                      opts.num_channels, DecimationThread::mode_name(default_mode));
 
         ProfileRunner profiler;
@@ -137,7 +219,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Run main loop
+        // =====================================================================
+        // Assemble AppComponents and run main loop
+        // =====================================================================
         AppCommandQueue cmd_queue;
         AppComponents app{};
         app.window = window;
@@ -147,20 +231,39 @@ int main(int argc, char* argv[]) {
         app.renderer = &renderer;
         app.buf_mgr = &buf_mgr;
         app.hud = &hud;
-        app.data_gen = &data_gen;
+        app.data_gen = data_gen.get();  // nullptr in IPC mode
         app.dec_thread = &dec_thread;
         app.benchmark = &benchmark;
         app.profiler = &profiler;
         app.drop_counters = drop_ptrs;
         app.num_channels = opts.num_channels;
         app.enable_profile = opts.enable_profile;
+        app.transport = pipe_consumer.get();  // nullptr in embedded mode
+        app.current_sample_rate = 1e6;
+        app.current_paused = false;
 
         run_main_loop(app);
 
+        // =====================================================================
         // Cleanup
+        // =====================================================================
         benchmark.stop_logging();
         dec_thread.stop();
-        data_gen.stop();
+
+        if (data_gen) {
+            data_gen->stop();
+        }
+
+        // Stop IPC receiver
+        ipc_receiver_stop.store(true, std::memory_order_relaxed);
+        pipe_consumer.reset();  // closes pipe fds, unblocks receiver read
+        if (ipc_receiver_thread.joinable()) {
+            ipc_receiver_thread.join();
+        }
+
+        // grebe-sg cleanup: ProcessHandle destructor terminates + waits
+        sg_process.reset();
+
         vkDeviceWaitIdle(ctx.device());
 
         int exit_code = 0;

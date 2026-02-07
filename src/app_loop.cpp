@@ -10,6 +10,8 @@
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
+#include "transport.h"
+#include "contracts.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
@@ -53,12 +55,30 @@ static void process_commands(AppComponents& app) {
         std::visit([&](auto&& c) {
             using T = std::decay_t<decltype(c)>;
             if constexpr (std::is_same_v<T, CmdSetSampleRate>) {
-                app.data_gen->set_sample_rate(c.rate);
+                if (app.data_gen) {
+                    // Embedded mode: direct DataGenerator control
+                    app.data_gen->set_sample_rate(c.rate);
+                } else if (app.transport) {
+                    // IPC mode: forward to grebe-sg
+                    IpcCommand ipc{};
+                    ipc.type = IpcCommand::SET_SAMPLE_RATE;
+                    ipc.value = c.rate;
+                    app.transport->send_command(ipc);
+                }
                 app.dec_thread->set_sample_rate(c.rate);
+                app.current_sample_rate = c.rate;
             } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
                 app.dec_thread->cycle_mode();
             } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
-                app.data_gen->set_paused(!app.data_gen->is_paused());
+                if (app.data_gen) {
+                    app.data_gen->set_paused(!app.data_gen->is_paused());
+                    app.current_paused = app.data_gen->is_paused();
+                } else if (app.transport) {
+                    IpcCommand ipc{};
+                    ipc.type = IpcCommand::TOGGLE_PAUSED;
+                    app.transport->send_command(ipc);
+                    app.current_paused = !app.current_paused;
+                }
             } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
                 int w, h;
                 glfwGetFramebufferSize(app.window, &w, &h);
@@ -160,7 +180,16 @@ void run_main_loop(AppComponents& app) {
         app.benchmark->set_samples_per_frame(raw_samples);
         app.benchmark->set_decimation_time(app.dec_thread->decimation_time_ms());
         app.benchmark->set_decimation_ratio(app.dec_thread->decimation_ratio());
-        app.benchmark->set_data_rate(app.data_gen->actual_sample_rate());
+
+        // Data rate: from DataGenerator (embedded) or local tracking (IPC)
+        double data_rate = app.data_gen
+            ? app.data_gen->actual_sample_rate()
+            : app.current_sample_rate;
+        bool paused = app.data_gen
+            ? app.data_gen->is_paused()
+            : app.current_paused;
+
+        app.benchmark->set_data_rate(data_rate);
         app.benchmark->set_ring_fill(app.dec_thread->ring_fill_ratio());
 
         // Upload decimated data to GPU (timed)
@@ -194,10 +223,10 @@ void run_main_loop(AppComponents& app) {
 
         // Build ImGui frame
         app.hud->new_frame();
-        app.hud->build_status_bar(*app.benchmark, app.data_gen->actual_sample_rate(),
+        app.hud->build_status_bar(*app.benchmark, data_rate,
                                   app.dec_thread->ring_fill_ratio(),
                                   app.buf_mgr->vertex_count(),
-                                  app.data_gen->is_paused(),
+                                  paused,
                                   app.dec_thread->effective_mode(),
                                   app.num_channels,
                                   total_drops);
@@ -225,7 +254,7 @@ void run_main_loop(AppComponents& app) {
         // Profile mode: collect metrics and manage scenario transitions
         if (app.enable_profile) {
             app.profiler->on_frame(*app.benchmark, app.buf_mgr->vertex_count(),
-                                   app.data_gen->actual_sample_rate(),
+                                   data_rate,
                                    app.dec_thread->ring_fill_ratio(),
                                    *app.cmd_queue);
         }
@@ -235,10 +264,11 @@ void run_main_loop(AppComponents& app) {
         if (now - last_title_update >= 0.25) {
             char title[128];
             std::snprintf(title, sizeof(title),
-                          "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s",
+                          "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s%s",
                           app.benchmark->fps(), app.benchmark->frame_time_avg(),
                           app.num_channels,
-                          DecimationThread::mode_name(app.dec_thread->effective_mode()));
+                          DecimationThread::mode_name(app.dec_thread->effective_mode()),
+                          app.transport ? " | IPC" : "");
             glfwSetWindowTitle(app.window, title);
             last_title_update = now;
         }

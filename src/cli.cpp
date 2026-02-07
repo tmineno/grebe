@@ -23,6 +23,8 @@ int parse_cli(int argc, char* argv[], CliOptions& opts) {
                 else if (suffix == 'K' || suffix == 'k') { multiplier = 1024; val.pop_back(); }
             }
             opts.ring_size = std::stoull(val) * multiplier;
+        } else if (arg == "--embedded") {
+            opts.embedded = true;
         } else if (arg.rfind("--channels=", 0) == 0) {
             opts.num_channels = static_cast<uint32_t>(std::stoul(arg.substr(11)));
             if (opts.num_channels < 1 || opts.num_channels > 8) {
