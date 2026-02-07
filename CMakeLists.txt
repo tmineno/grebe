@@ -208,6 +208,7 @@ add_library(grebe_common STATIC
     src/data_generator.cpp
     src/decimation_thread.cpp
     src/profiler.cpp
+    src/process_handle.cpp
 )
 
 target_include_directories(grebe_common PUBLIC ${CMAKE_SOURCE_DIR}/src)
