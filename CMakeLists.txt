@@ -153,8 +153,10 @@ add_executable(${PROJECT_NAME}
     src/buffer_manager.cpp
     src/data_generator.cpp
     src/decimator.cpp
+    src/decimation_thread.cpp
     src/benchmark.cpp
     src/hud.cpp
+    src/profiler.cpp
     src/vma_impl.cpp
 )
 

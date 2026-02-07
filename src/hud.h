@@ -1,9 +1,13 @@
 #pragma once
 
+#include "decimator.h"
+
 #include <vulkan/vulkan.h>
+#include <cstdint>
 
 struct GLFWwindow;
 class VulkanContext;
+class Benchmark;
 
 class Hud {
 public:
@@ -21,7 +25,9 @@ public:
 
     // Call each frame before draw_frame
     void new_frame();
-    void build_status_bar(double fps, double frame_time_ms);
+    void build_status_bar(const Benchmark& bench, double data_rate,
+                          double ring_fill, uint32_t vertex_count, bool paused,
+                          DecimationMode dec_mode = DecimationMode::None);
 
     // Call inside the active render pass
     void render(VkCommandBuffer cmd);

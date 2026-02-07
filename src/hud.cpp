@@ -1,5 +1,7 @@
 #include "hud.h"
 #include "vulkan_context.h"
+#include "benchmark.h"
+#include "decimation_thread.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -80,9 +82,11 @@ void Hud::new_frame() {
     ImGui::NewFrame();
 }
 
-void Hud::build_status_bar(double fps, double frame_time_ms) {
+void Hud::build_status_bar(const Benchmark& bench, double data_rate,
+                            double ring_fill, uint32_t vertex_count, bool paused,
+                            DecimationMode dec_mode) {
     ImGuiIO& io = ImGui::GetIO();
-    float bar_height = 28.0f;
+    float bar_height = 44.0f; // two lines
     float screen_width = io.DisplaySize.x;
     float screen_height = io.DisplaySize.y;
 
@@ -97,7 +101,35 @@ void Hud::build_status_bar(double fps, double frame_time_ms) {
                              ImGuiWindowFlags_NoNav;
 
     ImGui::Begin("##statusbar", nullptr, flags);
-    ImGui::Text("FPS: %.1f | Frame: %.2f ms", fps, frame_time_ms);
+
+    // Format data rate
+    const char* rate_suffix = "SPS";
+    double display_rate = data_rate;
+    if (data_rate >= 1e9)      { display_rate = data_rate / 1e9; rate_suffix = "GSPS"; }
+    else if (data_rate >= 1e6) { display_rate = data_rate / 1e6; rate_suffix = "MSPS"; }
+    else if (data_rate >= 1e3) { display_rate = data_rate / 1e3; rate_suffix = "KSPS"; }
+
+    // Format vertex count
+    const char* vtx_suffix = "";
+    double display_vtx = static_cast<double>(vertex_count);
+    if (vertex_count >= 1'000'000)  { display_vtx = vertex_count / 1e6; vtx_suffix = "M"; }
+    else if (vertex_count >= 1'000) { display_vtx = vertex_count / 1e3; vtx_suffix = "K"; }
+
+    // Line 1: overview
+    ImGui::Text("FPS: %.1f | Frame: %.2f ms | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
+                bench.fps(), bench.frame_time_avg(), display_rate, rate_suffix,
+                ring_fill * 100.0, display_vtx, vtx_suffix,
+                DecimationThread::mode_name(dec_mode),
+                paused ? " | PAUSED" : "");
+
+    // Line 2: per-phase telemetry
+    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f",
+                bench.drain_time_avg(),
+                bench.decimation_time_avg(), bench.decimation_ratio(),
+                bench.upload_time_avg(),
+                bench.swap_time_avg(), bench.render_time_avg(),
+                bench.samples_per_frame_avg());
+
     ImGui::End();
 }
 

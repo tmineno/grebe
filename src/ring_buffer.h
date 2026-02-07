@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include <cassert>
+#include <algorithm>
 
 // Lock-free single-producer single-consumer ring buffer
 template <typename T>
@@ -29,14 +31,36 @@ public:
         return true;
     }
 
-    // Producer: bulk push. Returns number of items actually pushed.
+    // Producer: bulk push with batched memcpy. Returns number of items pushed.
     size_t push_bulk(const T* data, size_t count) {
-        size_t pushed = 0;
-        for (size_t i = 0; i < count; i++) {
-            if (!push(data[i])) break;
-            pushed++;
+        if (count == 0) return 0;
+
+        size_t head = head_.load(std::memory_order_relaxed);
+        size_t tail = tail_.load(std::memory_order_acquire);
+
+        // Compute free space (one slot reserved as sentinel)
+        size_t free;
+        if (head >= tail) {
+            free = capacity_ - 1 - head + tail;
+        } else {
+            free = tail - head - 1;
         }
-        return pushed;
+
+        size_t to_push = std::min(count, free);
+        if (to_push == 0) return 0;
+
+        // Copy in up to 2 chunks (handle wraparound)
+        size_t first_chunk = std::min(to_push, capacity_ - head);
+        std::memcpy(&buffer_[head], data, first_chunk * sizeof(T));
+
+        if (to_push > first_chunk) {
+            size_t second_chunk = to_push - first_chunk;
+            std::memcpy(&buffer_[0], data + first_chunk, second_chunk * sizeof(T));
+        }
+
+        size_t new_head = (head + to_push) % capacity_;
+        head_.store(new_head, std::memory_order_release);
+        return to_push;
     }
 
     // Consumer: pop a single element. Returns false if empty.
@@ -50,14 +74,36 @@ public:
         return true;
     }
 
-    // Consumer: bulk pop into buffer. Returns number of items popped.
+    // Consumer: bulk pop with batched memcpy. Returns number of items popped.
     size_t pop_bulk(T* out, size_t max_count) {
-        size_t popped = 0;
-        for (size_t i = 0; i < max_count; i++) {
-            if (!pop(out[i])) break;
-            popped++;
+        if (max_count == 0) return 0;
+
+        size_t tail = tail_.load(std::memory_order_relaxed);
+        size_t head = head_.load(std::memory_order_acquire);
+
+        // Compute available items
+        size_t avail;
+        if (head >= tail) {
+            avail = head - tail;
+        } else {
+            avail = capacity_ - tail + head;
         }
-        return popped;
+
+        size_t to_pop = std::min(max_count, avail);
+        if (to_pop == 0) return 0;
+
+        // Copy in up to 2 chunks (handle wraparound)
+        size_t first_chunk = std::min(to_pop, capacity_ - tail);
+        std::memcpy(out, &buffer_[tail], first_chunk * sizeof(T));
+
+        if (to_pop > first_chunk) {
+            size_t second_chunk = to_pop - first_chunk;
+            std::memcpy(out + first_chunk, &buffer_[0], second_chunk * sizeof(T));
+        }
+
+        size_t new_tail = (tail + to_pop) % capacity_;
+        tail_.store(new_tail, std::memory_order_release);
+        return to_pop;
     }
 
     size_t size() const {
