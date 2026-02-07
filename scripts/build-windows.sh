@@ -159,7 +159,7 @@ if [ ${BUILD_EXIT} -ne 0 ]; then
 fi
 
 # ---------- Report ----------
-EXE_PATH="${WIN_BUILD_ROOT}/build/vulkan-stream-poc.exe"
+EXE_PATH="${WIN_BUILD_ROOT}/build/grebe.exe"
 if [ -f "${EXE_PATH}" ]; then
     EXE_SIZE=$(du -h "${EXE_PATH}" | cut -f1)
     info "============================================"
@@ -172,5 +172,5 @@ else
     warn "Build reported success but .exe not found at expected path."
     warn "Check: ${WIN_BUILD_ROOT}/build/"
     # Try to find it
-    find "${WIN_BUILD_ROOT}/build" -name "vulkan-stream-poc.exe" 2>/dev/null || true
+    find "${WIN_BUILD_ROOT}/build" -name "grebe.exe" 2>/dev/null || true
 fi

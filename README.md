@@ -53,7 +53,7 @@ cmake --build --preset linux-release --target run
 cmake --build --preset windows-release --target run
 
 # Or directly
-./build/release/vulkan-stream-poc
+./build/release/grebe
 ```
 
 ## Controls
@@ -73,22 +73,22 @@ cmake --build --preset windows-release --target run
 
 ```bash
 # Normal interactive mode
-./build/release/vulkan-stream-poc
+./build/release/grebe
 
 # Multi-channel (1-8 channels)
-./build/release/vulkan-stream-poc --channels=4
+./build/release/grebe --channels=4
 
 # Enable CSV telemetry logging to ./tmp/
-./build/release/vulkan-stream-poc --log
+./build/release/grebe --log
 
 # Run automated profiling (headless benchmark), outputs JSON report to ./tmp/
-./build/release/vulkan-stream-poc --profile
+./build/release/grebe --profile
 
 # Run profiling with larger ring buffer (needed for 1 GSPS)
-./build/release/vulkan-stream-poc --profile --ring-size=64M
+./build/release/grebe --profile --ring-size=64M
 
 # Run isolated microbenchmarks (BM-A through BM-E), outputs JSON to ./tmp/
-./build/release/vulkan-stream-poc --bench
+./build/release/grebe --bench
 ```
 
 ## Benchmarks

@@ -63,6 +63,18 @@
 
 ## 次期マイルストーン（実装予定）
 
+### Phase 7.5: Phase 8 事前リファクタ（低リスク化）
+
+- [ ] `src/main.cpp` の責務分離（CLI解析 / 実行モード選択 / ランタイムループ / 入力ハンドラを分離）
+- [ ] `DataGenerator` / `DecimationThread` 直接参照に依存しない制御I/F導入（command DTO化）
+- [ ] profile制御を in-process オブジェクト参照から分離（IPC/外部制御へ移行可能な構造へ）
+- [ ] 共有メモリ向け ring 実装の独立化（`std::vector` 依存の現行 `RingBuffer` から分離）
+- [ ] channel単位の drop/backpressure メトリクスを明示収集（生成側/消費側の整合確認）
+- [ ] CMake を multi-binary 前提に再編（`grebe` / `grebe-sg` / 共通 `ipc` ライブラリ）
+- [ ] SG UI 用の ImGui OpenGL backend ターゲット追加（`imgui_impl_opengl3`）
+- [ ] Windows スクリプトの実行ファイル名ハードコード解消（`vulkan-stream-poc.exe` 依存除去）
+- [ ] parent/child プロセス管理ユーティリティ整備（spawn/attach/監視/終了ハンドリング）
+
 ### Phase 8: 実行バイナリ分離 (`grebe` / `grebe-sg`)
 
 - [ ] `grebe` (可視化メイン) と `grebe-sg` (信号生成) の 2 実行バイナリ化

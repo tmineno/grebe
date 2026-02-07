@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vulkan-stream-poc VERSION 0.1.0 LANGUAGES CXX C)
+project(grebe VERSION 0.1.0 LANGUAGES CXX C)
 
 # =============================================================================
 # Windows Cross-Build from WSL2
