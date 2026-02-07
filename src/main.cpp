@@ -364,7 +364,7 @@ int main(int argc, char* argv[]) {
                 profiler.on_frame(benchmark, buf_mgr.vertex_count(),
                                   data_gen.actual_sample_rate(),
                                   dec_thread.ring_fill_ratio(),
-                                  data_gen, dec_thread, window);
+                                  cmd_queue);
             }
 
             // Update window title with FPS (throttled to 4 Hz)

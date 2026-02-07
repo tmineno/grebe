@@ -1,9 +1,7 @@
 #include "profiler.h"
+#include "app_command.h"
 #include "benchmark.h"
-#include "data_generator.h"
-#include "decimation_thread.h"
 
-#include <GLFW/glfw3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -36,8 +34,7 @@ bool ProfileRunner::should_continue() const {
 
 void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              double data_rate, double ring_fill,
-                             DataGenerator& data_gen, DecimationThread& dec_thread,
-                             GLFWwindow* window) {
+                             AppCommandQueue& cmd_queue) {
     if (finished_) return;
 
     build_scenarios();
@@ -50,8 +47,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         frame_in_scenario_ = 0;
         current_samples_.clear();
         current_samples_.reserve(scenario.measure_frames);
-        data_gen.set_sample_rate(scenario.sample_rate);
-        dec_thread.set_sample_rate(scenario.sample_rate);
+        cmd_queue.push(CmdSetSampleRate{scenario.sample_rate});
         spdlog::info("[profile] Starting scenario '{}' (rate={:.0f}, warmup={}, measure={})",
                      scenario.name, scenario.sample_rate,
                      scenario.warmup_frames, scenario.measure_frames);
@@ -129,7 +125,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
 
         if (current_scenario_ >= static_cast<int>(scenarios_.size())) {
             finished_ = true;
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            cmd_queue.push(CmdQuit{});
         }
     }
 }

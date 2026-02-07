@@ -4,10 +4,8 @@
 #include <string>
 #include <vector>
 
-struct GLFWwindow;
+class AppCommandQueue;
 class Benchmark;
-class DataGenerator;
-class DecimationThread;
 
 struct FrameSample {
     double frame_time_ms  = 0.0;
@@ -69,8 +67,7 @@ public:
     // Sets glfwSetWindowShouldClose when all done.
     void on_frame(const Benchmark& bench, uint32_t vertex_count,
                   double data_rate, double ring_fill,
-                  DataGenerator& data_gen, DecimationThread& dec_thread,
-                  GLFWwindow* window);
+                  AppCommandQueue& cmd_queue);
 
     void set_channel_count(uint32_t n) { channel_count_ = n; }
 
