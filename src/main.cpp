@@ -1,3 +1,4 @@
+#include "app_command.h"
 #include "vulkan_context.h"
 #include "swapchain.h"
 #include "renderer.h"
@@ -25,12 +26,7 @@
 static bool g_framebuffer_resized = false;
 
 struct AppState {
-    DataGenerator* data_gen = nullptr;
-    DecimationThread* dec_thread = nullptr;
-    Swapchain* swapchain = nullptr;
-    Renderer* renderer = nullptr;
-    Hud* hud = nullptr;
-    VulkanContext* ctx = nullptr;
+    AppCommandQueue* cmd_queue = nullptr;
 };
 
 static void framebuffer_resize_callback(GLFWwindow* /*window*/, int /*width*/, int /*height*/) {
@@ -41,58 +37,55 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
     if (action != GLFW_PRESS) return;
 
     auto* state = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    if (!state || !state->cmd_queue) return;
+
+    auto& q = *state->cmd_queue;
 
     switch (key) {
-    case GLFW_KEY_ESCAPE:
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-        break;
-    case GLFW_KEY_V:
-        if (state && state->swapchain && state->ctx && state->renderer && state->hud) {
-            int w, h;
-            glfwGetFramebufferSize(window, &w, &h);
-            if (w > 0 && h > 0) {
-                state->swapchain->set_vsync(!state->swapchain->vsync());
-                state->swapchain->recreate(*state->ctx,
-                                           static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-                state->renderer->on_swapchain_recreated(*state->ctx, *state->swapchain);
-                state->hud->on_swapchain_recreated(state->swapchain->image_count());
-                spdlog::info("V-Sync {}", state->swapchain->vsync() ? "ON" : "OFF");
+    case GLFW_KEY_ESCAPE:  q.push(CmdQuit{});                   break;
+    case GLFW_KEY_V:       q.push(CmdToggleVsync{});            break;
+    case GLFW_KEY_D:       q.push(CmdCycleDecimationMode{});    break;
+    case GLFW_KEY_1:       q.push(CmdSetSampleRate{1e6});       break;
+    case GLFW_KEY_2:       q.push(CmdSetSampleRate{10e6});      break;
+    case GLFW_KEY_3:       q.push(CmdSetSampleRate{100e6});     break;
+    case GLFW_KEY_4:       q.push(CmdSetSampleRate{1e9});       break;
+    case GLFW_KEY_SPACE:   q.push(CmdTogglePaused{});           break;
+    default: break;
+    }
+}
+
+static void process_commands(AppCommandQueue& cmd_queue,
+                             GLFWwindow* window,
+                             DataGenerator& data_gen,
+                             DecimationThread& dec_thread,
+                             Swapchain& swapchain,
+                             VulkanContext& ctx,
+                             Renderer& renderer,
+                             Hud& hud) {
+    for (auto& cmd : cmd_queue.drain()) {
+        std::visit([&](auto&& c) {
+            using T = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<T, CmdSetSampleRate>) {
+                data_gen.set_sample_rate(c.rate);
+                dec_thread.set_sample_rate(c.rate);
+            } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
+                dec_thread.cycle_mode();
+            } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
+                data_gen.set_paused(!data_gen.is_paused());
+            } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
+                int w, h;
+                glfwGetFramebufferSize(window, &w, &h);
+                if (w > 0 && h > 0) {
+                    swapchain.set_vsync(!swapchain.vsync());
+                    swapchain.recreate(ctx, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+                    renderer.on_swapchain_recreated(ctx, swapchain);
+                    hud.on_swapchain_recreated(swapchain.image_count());
+                    spdlog::info("V-Sync {}", swapchain.vsync() ? "ON" : "OFF");
+                }
+            } else if constexpr (std::is_same_v<T, CmdQuit>) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
-        }
-        break;
-    case GLFW_KEY_D:
-        if (state && state->dec_thread) state->dec_thread->cycle_mode();
-        break;
-    case GLFW_KEY_1:
-        if (state && state->data_gen) {
-            state->data_gen->set_sample_rate(1e6);
-            if (state->dec_thread) state->dec_thread->set_sample_rate(1e6);
-        }
-        break;
-    case GLFW_KEY_2:
-        if (state && state->data_gen) {
-            state->data_gen->set_sample_rate(10e6);
-            if (state->dec_thread) state->dec_thread->set_sample_rate(10e6);
-        }
-        break;
-    case GLFW_KEY_3:
-        if (state && state->data_gen) {
-            state->data_gen->set_sample_rate(100e6);
-            if (state->dec_thread) state->dec_thread->set_sample_rate(100e6);
-        }
-        break;
-    case GLFW_KEY_4:
-        if (state && state->data_gen) {
-            state->data_gen->set_sample_rate(1e9);
-            if (state->dec_thread) state->dec_thread->set_sample_rate(1e9);
-        }
-        break;
-    case GLFW_KEY_SPACE:
-        if (state && state->data_gen)
-            state->data_gen->set_paused(!state->data_gen->is_paused());
-        break;
-    default:
-        break;
+        }, cmd);
     }
 }
 
@@ -144,7 +137,9 @@ int main(int argc, char* argv[]) {
         }
 
         // App state for keyboard callbacks
+        AppCommandQueue cmd_queue;
         AppState app_state;
+        app_state.cmd_queue = &cmd_queue;
         glfwSetWindowUserPointer(window, &app_state);
         glfwSetFramebufferSizeCallback(window, framebuffer_resize_callback);
         glfwSetKeyCallback(window, key_callback);
@@ -210,20 +205,13 @@ int main(int argc, char* argv[]) {
         spdlog::info("Ring buffers: {}ch × {} samples ({} MB each)",
                      num_channels, ring_size, ring_size * 2 / (1024 * 1024));
 
-        app_state.swapchain = &swapchain;
-        app_state.renderer = &renderer;
-        app_state.hud = &hud;
-        app_state.ctx = &ctx;
-
         DataGenerator data_gen;
-        app_state.data_gen = &data_gen;
         data_gen.start(ring_ptrs, 1'000'000.0, WaveformType::Sine);
 
         // Decimation thread (Phase 2)
         constexpr uint32_t DECIMATE_TARGET = 1920 * 2; // min/max pairs for screen width
         DecimationMode default_mode = DecimationMode::MinMax;
         DecimationThread dec_thread;
-        app_state.dec_thread = &dec_thread;
         dec_thread.start(ring_ptrs, DECIMATE_TARGET, default_mode);
         dec_thread.set_sample_rate(1'000'000.0);
 
@@ -282,6 +270,10 @@ int main(int argc, char* argv[]) {
         // Main loop
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+
+            // Process queued commands from keyboard/profiler
+            process_commands(cmd_queue, window, data_gen, dec_thread,
+                             swapchain, ctx, renderer, hud);
 
             // Handle resize
             if (g_framebuffer_resized) {

@@ -184,6 +184,7 @@ add_custom_target(compile_shaders DEPENDS ${SHADER_SPIRV_FILES})
 
 add_executable(${PROJECT_NAME}
     src/main.cpp
+    src/app_command.cpp
     src/vulkan_context.cpp
     src/swapchain.cpp
     src/renderer.cpp
