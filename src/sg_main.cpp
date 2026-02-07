@@ -131,8 +131,7 @@ static void command_reader_func(
         if (producer.receive_command(cmd)) {
             switch (static_cast<IpcCommand::Type>(cmd.type)) {
             case IpcCommand::SET_SAMPLE_RATE:
-                spdlog::info("grebe-sg: set sample rate to {:.0f}", cmd.value);
-                data_gen.set_sample_rate(cmd.value);
+                // Ignored: grebe-sg owns sample rate authority (Phase 9)
                 break;
             case IpcCommand::TOGGLE_PAUSED:
                 data_gen.set_paused(!data_gen.is_paused());
@@ -180,7 +179,7 @@ int main(int argc, char* argv[]) {
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
 
-        window = glfwCreateWindow(480, 320, "grebe-sg", nullptr, nullptr);
+        window = glfwCreateWindow(400, 600, "grebe-sg", nullptr, nullptr);
         if (window) {
             glfwMakeContextCurrent(window);
             glfwSwapInterval(1);
@@ -239,6 +238,22 @@ int main(int argc, char* argv[]) {
                            std::ref(producer), std::ref(data_gen),
                            std::ref(stop_requested));
 
+    // UI state
+    const double rate_options[] = {1e6, 10e6, 100e6, 1e9};
+    const char* rate_labels[] = {"1 MSPS", "10 MSPS", "100 MSPS", "1 GSPS"};
+    int rate_sel = 0;  // index into rate_options
+
+    const uint32_t block_options[] = {1024, 2048, 4096, 8192, 16384, 65536};
+    const char* block_labels[] = {"1024", "2048", "4096", "8192", "16384", "65536"};
+    int block_sel = 2;  // default 4096
+
+    const char* waveform_labels[] = {"Sine", "Square", "Sawtooth", "WhiteNoise", "Chirp"};
+    const WaveformType waveform_values[] = {
+        WaveformType::Sine, WaveformType::Square, WaveformType::Sawtooth,
+        WaveformType::WhiteNoise, WaveformType::Chirp
+    };
+    std::vector<int> ch_waveform_sel(opts.num_channels, 0);  // per-channel selection
+
     // Main loop
     if (has_window) {
         while (!glfwWindowShouldClose(window) &&
@@ -262,18 +277,59 @@ int main(int argc, char* argv[]) {
 
             ImGui::Text("grebe-sg Signal Generator");
             ImGui::Separator();
+            ImGui::Spacing();
 
-            double rate = data_gen.actual_sample_rate();
+            // --- Sample Rate ---
+            ImGui::Text("Sample Rate");
+            for (int i = 0; i < 4; i++) {
+                if (ImGui::RadioButton(rate_labels[i], &rate_sel, i)) {
+                    data_gen.set_sample_rate(rate_options[rate_sel]);
+                    spdlog::info("Sample rate -> {}", rate_labels[rate_sel]);
+                }
+                if (i % 2 == 0) ImGui::SameLine();
+            }
+            ImGui::Spacing();
+
+            // --- Block Length ---
+            ImGui::Text("Block Length");
+            if (ImGui::Combo("##block", &block_sel, block_labels, 6)) {
+                block_size.store(block_options[block_sel], std::memory_order_relaxed);
+                spdlog::info("Block size -> {}", block_options[block_sel]);
+            }
+            ImGui::Spacing();
+
+            // --- Per-channel Waveforms ---
+            ImGui::Text("Waveforms");
+            for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
+                char label[32];
+                std::snprintf(label, sizeof(label), "Ch %u##wf%u", ch + 1, ch);
+                if (ImGui::Combo(label, &ch_waveform_sel[ch], waveform_labels, 5)) {
+                    data_gen.set_channel_waveform(ch, waveform_values[ch_waveform_sel[ch]]);
+                    spdlog::info("Ch {} waveform -> {}", ch + 1,
+                                 waveform_labels[ch_waveform_sel[ch]]);
+                }
+            }
+            ImGui::Spacing();
+
+            // --- Pause / Resume ---
+            bool paused = data_gen.is_paused();
+            if (ImGui::Button(paused ? "Resume" : "Pause", ImVec2(120, 0))) {
+                data_gen.set_paused(!paused);
+                spdlog::info(paused ? "Resumed" : "Paused");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // --- Status ---
+            ImGui::Text("Status");
+            double actual_rate = data_gen.actual_sample_rate();
             const char* suffix = "SPS";
-            if (rate >= 1e9)      { rate /= 1e9; suffix = "GSPS"; }
-            else if (rate >= 1e6) { rate /= 1e6; suffix = "MSPS"; }
-            else if (rate >= 1e3) { rate /= 1e3; suffix = "KSPS"; }
-
-            ImGui::Text("Channels: %u", opts.num_channels);
-            ImGui::Text("Sample Rate: %.1f %s (target: %.0f)", rate, suffix,
-                         data_gen.target_sample_rate());
-            ImGui::Text("Waveform: Sine");
-            ImGui::Text("Paused: %s", data_gen.is_paused() ? "YES" : "NO");
+            double display_rate = actual_rate;
+            if (display_rate >= 1e9)      { display_rate /= 1e9; suffix = "GSPS"; }
+            else if (display_rate >= 1e6) { display_rate /= 1e6; suffix = "MSPS"; }
+            else if (display_rate >= 1e3) { display_rate /= 1e3; suffix = "KSPS"; }
+            ImGui::Text("Actual Rate: %.1f %s", display_rate, suffix);
             ImGui::Text("Total Samples: %llu",
                          static_cast<unsigned long long>(data_gen.total_samples_generated()));
 
@@ -284,6 +340,8 @@ int main(int argc, char* argv[]) {
             if (total_drops > 0) {
                 ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Drops: %llu",
                                    static_cast<unsigned long long>(total_drops));
+            } else {
+                ImGui::Text("Drops: 0");
             }
 
             ImGui::End();
