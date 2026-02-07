@@ -1,0 +1,35 @@
+#include "cli.h"
+
+#include <spdlog/spdlog.h>
+
+#include <string>
+
+int parse_cli(int argc, char* argv[], CliOptions& opts) {
+    for (int i = 1; i < argc; i++) {
+        std::string arg(argv[i]);
+        if (arg == "--log") {
+            opts.enable_log = true;
+        } else if (arg == "--profile") {
+            opts.enable_profile = true;
+        } else if (arg == "--bench") {
+            opts.enable_bench = true;
+        } else if (arg.rfind("--ring-size=", 0) == 0) {
+            std::string val = arg.substr(12);
+            size_t multiplier = 1;
+            if (!val.empty()) {
+                char suffix = val.back();
+                if (suffix == 'M' || suffix == 'm') { multiplier = 1024ULL * 1024; val.pop_back(); }
+                else if (suffix == 'G' || suffix == 'g') { multiplier = 1024ULL * 1024 * 1024; val.pop_back(); }
+                else if (suffix == 'K' || suffix == 'k') { multiplier = 1024; val.pop_back(); }
+            }
+            opts.ring_size = std::stoull(val) * multiplier;
+        } else if (arg.rfind("--channels=", 0) == 0) {
+            opts.num_channels = static_cast<uint32_t>(std::stoul(arg.substr(11)));
+            if (opts.num_channels < 1 || opts.num_channels > 8) {
+                spdlog::error("--channels must be 1-8, got {}", opts.num_channels);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}

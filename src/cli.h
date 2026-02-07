@@ -1,0 +1,15 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+struct CliOptions {
+    bool enable_log = false;
+    bool enable_profile = false;
+    bool enable_bench = false;
+    size_t ring_size = 16'777'216;  // 16M samples
+    uint32_t num_channels = 1;
+};
+
+// Returns 0 on success, non-zero on error (caller should exit with that code).
+int parse_cli(int argc, char* argv[], CliOptions& opts);
