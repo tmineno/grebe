@@ -9,6 +9,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <atomic>
 #include <chrono>
@@ -151,6 +152,9 @@ static void command_reader_func(
 // =========================================================================
 
 int main(int argc, char* argv[]) {
+    // CRITICAL: redirect spdlog to stderr — stdout is the IPC data pipe
+    auto stderr_logger = spdlog::stderr_color_mt("grebe-sg");
+    spdlog::set_default_logger(stderr_logger);
     spdlog::set_pattern("[grebe-sg] [%H:%M:%S.%e] [%l] %v");
 
     SgOptions opts;
@@ -159,34 +163,37 @@ int main(int argc, char* argv[]) {
     spdlog::info("Starting: {}ch, {:.0f} SPS, ring={}",
                  opts.num_channels, opts.sample_rate, opts.ring_size);
 
-    // Init GLFW + OpenGL
-    if (!glfwInit()) {
-        spdlog::error("Failed to initialize GLFW");
-        return 1;
-    }
+    // Init GLFW + OpenGL (optional — headless if window creation fails)
+    bool has_window = false;
+    GLFWwindow* window = nullptr;
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    if (glfwInit()) {
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
 
-    GLFWwindow* window = glfwCreateWindow(480, 320, "grebe-sg", nullptr, nullptr);
-    if (!window) {
-        spdlog::error("Failed to create GLFW window");
-        glfwTerminate();
-        return 1;
-    }
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);  // V-Sync on for SG window (low priority rendering)
+        window = glfwCreateWindow(480, 320, "grebe-sg", nullptr, nullptr);
+        if (window) {
+            glfwMakeContextCurrent(window);
+            glfwSwapInterval(1);
 
-    // Init ImGui
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGui::StyleColorsDark();
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 330");
+            IMGUI_CHECKVERSION();
+            ImGui::CreateContext();
+            ImGui::StyleColorsDark();
+            ImGui_ImplGlfw_InitForOpenGL(window, true);
+            ImGui_ImplOpenGL3_Init("#version 330");
+            has_window = true;
+            spdlog::info("GUI window initialized");
+        } else {
+            spdlog::warn("Window creation failed, running headless");
+            glfwTerminate();
+        }
+    } else {
+        spdlog::warn("GLFW init failed, running headless");
+    }
 
     // Create ring buffers
     std::vector<std::unique_ptr<RingBuffer<int16_t>>> ring_buffers;
@@ -224,65 +231,69 @@ int main(int argc, char* argv[]) {
                            std::ref(producer), std::ref(data_gen),
                            std::ref(stop_requested));
 
-    // Main loop (ImGui status display)
-    while (!glfwWindowShouldClose(window) &&
-           !stop_requested.load(std::memory_order_relaxed)) {
-        glfwPollEvents();
+    // Main loop
+    if (has_window) {
+        while (!glfwWindowShouldClose(window) &&
+               !stop_requested.load(std::memory_order_relaxed)) {
+            glfwPollEvents();
 
-        // Check for Esc key
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            break;
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+                break;
+            }
+
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            ImGuiIO& io = ImGui::GetIO();
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(io.DisplaySize);
+            ImGui::Begin("grebe-sg", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+
+            ImGui::Text("grebe-sg Signal Generator");
+            ImGui::Separator();
+
+            double rate = data_gen.actual_sample_rate();
+            const char* suffix = "SPS";
+            if (rate >= 1e9)      { rate /= 1e9; suffix = "GSPS"; }
+            else if (rate >= 1e6) { rate /= 1e6; suffix = "MSPS"; }
+            else if (rate >= 1e3) { rate /= 1e3; suffix = "KSPS"; }
+
+            ImGui::Text("Channels: %u", opts.num_channels);
+            ImGui::Text("Sample Rate: %.1f %s (target: %.0f)", rate, suffix,
+                         data_gen.target_sample_rate());
+            ImGui::Text("Waveform: Sine");
+            ImGui::Text("Paused: %s", data_gen.is_paused() ? "YES" : "NO");
+            ImGui::Text("Total Samples: %llu",
+                         static_cast<unsigned long long>(data_gen.total_samples_generated()));
+
+            uint64_t total_drops = 0;
+            for (auto* dc : drop_ptrs) {
+                total_drops += dc->total_dropped();
+            }
+            if (total_drops > 0) {
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Drops: %llu",
+                                   static_cast<unsigned long long>(total_drops));
+            }
+
+            ImGui::End();
+            ImGui::Render();
+
+            int display_w, display_h;
+            glfwGetFramebufferSize(window, &display_w, &display_h);
+            glViewport(0, 0, display_w, display_h);
+            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            glfwSwapBuffers(window);
         }
-
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-
-        // Status window
-        ImGuiIO& io = ImGui::GetIO();
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin("grebe-sg", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-
-        ImGui::Text("grebe-sg Signal Generator");
-        ImGui::Separator();
-
-        double rate = data_gen.actual_sample_rate();
-        const char* suffix = "SPS";
-        if (rate >= 1e9)      { rate /= 1e9; suffix = "GSPS"; }
-        else if (rate >= 1e6) { rate /= 1e6; suffix = "MSPS"; }
-        else if (rate >= 1e3) { rate /= 1e3; suffix = "KSPS"; }
-
-        ImGui::Text("Channels: %u", opts.num_channels);
-        ImGui::Text("Sample Rate: %.1f %s (target: %.0f)", rate, suffix,
-                     data_gen.target_sample_rate());
-        ImGui::Text("Waveform: Sine");
-        ImGui::Text("Paused: %s", data_gen.is_paused() ? "YES" : "NO");
-        ImGui::Text("Total Samples: %llu",
-                     static_cast<unsigned long long>(data_gen.total_samples_generated()));
-
-        // Drop stats
-        uint64_t total_drops = 0;
-        for (auto* dc : drop_ptrs) {
-            total_drops += dc->total_dropped();
+    } else {
+        // Headless: just wait for stop signal
+        while (!stop_requested.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        if (total_drops > 0) {
-            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Drops: %llu",
-                               static_cast<unsigned long long>(total_drops));
-        }
-
-        ImGui::End();
-
-        ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glfwSwapBuffers(window);
     }
 
     // Cleanup
@@ -292,11 +303,13 @@ int main(int argc, char* argv[]) {
     if (sender.joinable()) sender.join();
     if (cmd_reader.joinable()) cmd_reader.join();
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    if (has_window) {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+    }
 
     spdlog::info("Clean shutdown");
     return 0;
