@@ -2,6 +2,7 @@
 
 #include "ring_buffer.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <thread>
@@ -17,11 +18,13 @@ enum class WaveformType {
 
 class DataGenerator {
 public:
+    static constexpr size_t SINE_LUT_SIZE = 4096;
+
     // Phase 0: generate a static waveform buffer
     static std::vector<int16_t> generate_static(WaveformType type, uint32_t num_samples,
                                                  double frequency = 1.0, double sample_rate = 1920.0);
 
-    DataGenerator() = default;
+    DataGenerator();
     ~DataGenerator();
 
     DataGenerator(const DataGenerator&) = delete;
@@ -43,6 +46,18 @@ public:
 
 private:
     void thread_func();
+    void rebuild_period_buffer(double sample_rate, double frequency, WaveformType type);
+
+    // Pre-computed sine lookup table (int16 values)
+    std::array<int16_t, SINE_LUT_SIZE> sine_lut_;
+
+    // Period tiling: pre-computed waveform period for memcpy-based generation
+    std::vector<int16_t> period_buf_;
+    size_t period_len_ = 0;
+    size_t period_pos_ = 0;
+    double cached_sample_rate_ = 0;
+    double cached_frequency_ = 0;
+    WaveformType cached_type_ = WaveformType::Sine;
 
     RingBuffer<int16_t>* ring_buffer_ = nullptr;
     std::thread thread_;

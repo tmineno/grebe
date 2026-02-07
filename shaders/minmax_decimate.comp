@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+// Input: raw int16 samples stored as int32 (one sample per int)
+layout(set = 0, binding = 0) readonly buffer InputData {
+    int samples[];
+};
+
+// Output: min/max pairs (2 ints per bucket)
+layout(set = 0, binding = 1) writeonly buffer OutputData {
+    int result[];
+};
+
+layout(push_constant) uniform Params {
+    uint total_samples;
+    uint num_buckets;
+};
+
+shared int s_min[256];
+shared int s_max[256];
+
+void main() {
+    uint bucket_id = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    if (bucket_id >= num_buckets) return;
+
+    // Compute bucket range (avoid uint32 overflow: bucket_id * total_samples can exceed 2^32)
+    uint base_size = total_samples / num_buckets;
+    uint remainder = total_samples - base_size * num_buckets;
+    uint bucket_start = bucket_id * base_size + min(bucket_id, remainder);
+    uint bucket_size  = base_size + (bucket_id < remainder ? 1u : 0u);
+
+    // Initialize local min/max
+    int local_min = 32767;
+    int local_max = -32768;
+
+    // Each thread processes multiple elements with stride
+    for (uint i = lid; i < bucket_size; i += 256) {
+        uint idx = bucket_start + i;
+        int val = samples[idx];
+        local_min = min(local_min, val);
+        local_max = max(local_max, val);
+    }
+
+    s_min[lid] = local_min;
+    s_max[lid] = local_max;
+    barrier();
+
+    // Parallel reduction in shared memory
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            s_min[lid] = min(s_min[lid], s_min[lid + stride]);
+            s_max[lid] = max(s_max[lid], s_max[lid + stride]);
+        }
+        barrier();
+    }
+
+    if (lid == 0) {
+        result[bucket_id * 2]     = s_min[0];
+        result[bucket_id * 2 + 1] = s_max[0];
+    }
+}

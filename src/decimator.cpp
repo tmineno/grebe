@@ -4,6 +4,10 @@
 #include <cmath>
 #include <limits>
 
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+
 std::vector<int16_t> Decimator::decimate(const std::vector<int16_t>& input,
                                           DecimationMode mode,
                                           uint32_t target_points) {
@@ -22,11 +26,11 @@ std::vector<int16_t> Decimator::passthrough(const std::vector<int16_t>& input) {
     return input;
 }
 
-std::vector<int16_t> Decimator::minmax(const std::vector<int16_t>& input, uint32_t target_points) {
+// Scalar MinMax (always available, used for benchmarking)
+std::vector<int16_t> Decimator::minmax_scalar(const std::vector<int16_t>& input, uint32_t target_points) {
     if (target_points < 2) return {};
     if (input.size() <= target_points) return input;
 
-    // Each bucket produces a min/max pair → num_buckets = target_points / 2
     uint32_t num_buckets = target_points / 2;
     std::vector<int16_t> output;
     output.reserve(num_buckets * 2);
@@ -53,6 +57,95 @@ std::vector<int16_t> Decimator::minmax(const std::vector<int16_t>& input, uint32
 
     return output;
 }
+
+#ifdef __SSE2__
+
+// SSE2 horizontal min of 8 x int16 packed in __m128i
+static inline int16_t hmin_epi16(__m128i v) {
+    // Compare high 64 bits with low 64 bits
+    v = _mm_min_epi16(v, _mm_shufflehi_epi16(_mm_shuffle_epi32(v, _MM_SHUFFLE(1, 0, 3, 2)), _MM_SHUFFLE(1, 0, 3, 2)));
+    // Now min is in low 64 bits; compare pairs
+    v = _mm_min_epi16(v, _mm_shufflelo_epi16(v, _MM_SHUFFLE(1, 0, 3, 2)));
+    // Compare last pair
+    v = _mm_min_epi16(v, _mm_shufflelo_epi16(v, _MM_SHUFFLE(0, 1, 0, 1)));
+    return static_cast<int16_t>(_mm_extract_epi16(v, 0));
+}
+
+// SSE2 horizontal max of 8 x int16 packed in __m128i
+static inline int16_t hmax_epi16(__m128i v) {
+    v = _mm_max_epi16(v, _mm_shufflehi_epi16(_mm_shuffle_epi32(v, _MM_SHUFFLE(1, 0, 3, 2)), _MM_SHUFFLE(1, 0, 3, 2)));
+    v = _mm_max_epi16(v, _mm_shufflelo_epi16(v, _MM_SHUFFLE(1, 0, 3, 2)));
+    v = _mm_max_epi16(v, _mm_shufflelo_epi16(v, _MM_SHUFFLE(0, 1, 0, 1)));
+    return static_cast<int16_t>(_mm_extract_epi16(v, 0));
+}
+
+// SIMD MinMax: process 16 int16 values per iteration (2x unrolled SSE2)
+std::vector<int16_t> Decimator::minmax(const std::vector<int16_t>& input, uint32_t target_points) {
+    if (target_points < 2) return {};
+    if (input.size() <= target_points) return input;
+
+    uint32_t num_buckets = target_points / 2;
+    std::vector<int16_t> output;
+    output.reserve(num_buckets * 2);
+
+    size_t n = input.size();
+    const int16_t* data = input.data();
+
+    for (uint32_t b = 0; b < num_buckets; b++) {
+        size_t start = (static_cast<size_t>(b) * n) / num_buckets;
+        size_t end   = (static_cast<size_t>(b + 1) * n) / num_buckets;
+        size_t len   = end - start;
+
+        const int16_t* ptr = data + start;
+
+        __m128i vmin = _mm_set1_epi16(std::numeric_limits<int16_t>::max());
+        __m128i vmax = _mm_set1_epi16(std::numeric_limits<int16_t>::min());
+
+        size_t i = 0;
+
+        // Process 16 values per iteration (2x unrolled, 8 int16 per __m128i)
+        for (; i + 15 < len; i += 16) {
+            __m128i v0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr + i));
+            __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr + i + 8));
+            vmin = _mm_min_epi16(vmin, v0);
+            vmin = _mm_min_epi16(vmin, v1);
+            vmax = _mm_max_epi16(vmax, v0);
+            vmax = _mm_max_epi16(vmax, v1);
+        }
+
+        // Process remaining groups of 8
+        for (; i + 7 < len; i += 8) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr + i));
+            vmin = _mm_min_epi16(vmin, v);
+            vmax = _mm_max_epi16(vmax, v);
+        }
+
+        // Horizontal reduction
+        int16_t lo = hmin_epi16(vmin);
+        int16_t hi = hmax_epi16(vmax);
+
+        // Scalar tail for remaining elements
+        for (; i < len; i++) {
+            int16_t v = ptr[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+
+        output.push_back(lo);
+        output.push_back(hi);
+    }
+
+    return output;
+}
+
+#else
+
+// Non-SIMD fallback: use scalar implementation
+std::vector<int16_t> Decimator::minmax(const std::vector<int16_t>& input, uint32_t target_points) {
+    return minmax_scalar(input, target_points);
+}
+
+#endif // __SSE2__
 
 std::vector<int16_t> Decimator::lttb(const std::vector<int16_t>& input, uint32_t target_points) {
     if (target_points < 3) return {};

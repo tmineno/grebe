@@ -19,8 +19,11 @@ public:
     // Passthrough (no decimation)
     static std::vector<int16_t> passthrough(const std::vector<int16_t>& input);
 
-    // MinMax decimation: for each bucket, output min and max
+    // MinMax decimation: for each bucket, output min and max (auto-selects SIMD when available)
     static std::vector<int16_t> minmax(const std::vector<int16_t>& input, uint32_t target_points);
+
+    // MinMax scalar-only path (for benchmarking comparison)
+    static std::vector<int16_t> minmax_scalar(const std::vector<int16_t>& input, uint32_t target_points);
 
     // LTTB (Largest Triangle Three Buckets)
     static std::vector<int16_t> lttb(const std::vector<int16_t>& input, uint32_t target_points);

@@ -8,6 +8,7 @@
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
+#include "microbench.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
@@ -25,6 +26,10 @@ static bool g_framebuffer_resized = false;
 struct AppState {
     DataGenerator* data_gen = nullptr;
     DecimationThread* dec_thread = nullptr;
+    Swapchain* swapchain = nullptr;
+    Renderer* renderer = nullptr;
+    Hud* hud = nullptr;
+    VulkanContext* ctx = nullptr;
 };
 
 static void framebuffer_resize_callback(GLFWwindow* /*window*/, int /*width*/, int /*height*/) {
@@ -41,7 +46,18 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
     case GLFW_KEY_V:
-        // V-Sync toggle (future)
+        if (state && state->swapchain && state->ctx && state->renderer && state->hud) {
+            int w, h;
+            glfwGetFramebufferSize(window, &w, &h);
+            if (w > 0 && h > 0) {
+                state->swapchain->set_vsync(!state->swapchain->vsync());
+                state->swapchain->recreate(*state->ctx,
+                                           static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+                state->renderer->on_swapchain_recreated(*state->ctx, *state->swapchain);
+                state->hud->on_swapchain_recreated(state->swapchain->image_count());
+                spdlog::info("V-Sync {}", state->swapchain->vsync() ? "ON" : "OFF");
+            }
+        }
         break;
     case GLFW_KEY_D:
         if (state && state->dec_thread) state->dec_thread->cycle_mode();
@@ -72,9 +88,24 @@ int main(int argc, char* argv[]) {
         // Parse CLI options
         bool enable_log = false;
         bool enable_profile = false;
+        bool enable_bench = false;
+        size_t ring_size = 16'777'216; // 16M samples default
         for (int i = 1; i < argc; i++) {
-            if (std::string(argv[i]) == "--log") enable_log = true;
-            if (std::string(argv[i]) == "--profile") enable_profile = true;
+            std::string arg(argv[i]);
+            if (arg == "--log") enable_log = true;
+            else if (arg == "--profile") enable_profile = true;
+            else if (arg == "--bench") enable_bench = true;
+            else if (arg.rfind("--ring-size=", 0) == 0) {
+                std::string val = arg.substr(12);
+                size_t multiplier = 1;
+                if (!val.empty()) {
+                    char suffix = val.back();
+                    if (suffix == 'M' || suffix == 'm') { multiplier = 1024ULL * 1024; val.pop_back(); }
+                    else if (suffix == 'G' || suffix == 'g') { multiplier = 1024ULL * 1024 * 1024; val.pop_back(); }
+                    else if (suffix == 'K' || suffix == 'k') { multiplier = 1024; val.pop_back(); }
+                }
+                ring_size = std::stoull(val) * multiplier;
+            }
         }
 
         // Init GLFW
@@ -116,6 +147,24 @@ int main(int argc, char* argv[]) {
         Renderer renderer;
         renderer.init(ctx, swapchain, SHADER_DIR);
 
+        // Bench mode: run microbenchmarks and exit
+        if (enable_bench) {
+            // Recreate swapchain with V-Sync OFF for draw benchmarks
+            swapchain.set_vsync(false);
+            swapchain.recreate(ctx, static_cast<uint32_t>(fb_width), static_cast<uint32_t>(fb_height));
+            renderer.on_swapchain_recreated(ctx, swapchain);
+
+            int bench_code = run_microbenchmarks(ctx, swapchain, buf_mgr, renderer, SHADER_DIR);
+
+            renderer.destroy();
+            buf_mgr.destroy();
+            swapchain.destroy(ctx.device());
+            ctx.destroy();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return bench_code;
+        }
+
         // Init benchmark
         Benchmark benchmark;
         if (enable_log) {
@@ -131,8 +180,13 @@ int main(int argc, char* argv[]) {
         hud.init(window, ctx, renderer.render_pass(), swapchain.image_count());
 
         // Streaming pipeline
-        constexpr size_t RING_BUFFER_CAPACITY = 16'777'216; // 16M samples (32 MB)
-        RingBuffer<int16_t> ring_buffer(RING_BUFFER_CAPACITY + 1); // +1 for SPSC sentinel
+        RingBuffer<int16_t> ring_buffer(ring_size + 1); // +1 for SPSC sentinel
+        spdlog::info("Ring buffer: {} samples ({} MB)", ring_size, ring_size * 2 / (1024 * 1024));
+
+        app_state.swapchain = &swapchain;
+        app_state.renderer = &renderer;
+        app_state.hud = &hud;
+        app_state.ctx = &ctx;
 
         DataGenerator data_gen;
         app_state.data_gen = &data_gen;

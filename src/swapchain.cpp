@@ -26,15 +26,20 @@ void Swapchain::recreate(VulkanContext& ctx, uint32_t width, uint32_t height) {
 void Swapchain::create(VulkanContext& ctx, uint32_t width, uint32_t height) {
     vkb::SwapchainBuilder builder{ctx.physical_device(), ctx.device(), ctx.surface()};
 
-    auto present_mode = vsync_ ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
+    // V-Sync OFF: prefer IMMEDIATE (true uncapped), fallback to MAILBOX
+    auto present_mode = vsync_ ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
 
-    auto swap_ret = builder
-        .set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-        .set_desired_present_mode(present_mode)
-        .set_desired_extent(width, height)
-        .set_desired_min_image_count(3)
-        .set_old_swapchain(swapchain_)
-        .build();
+    builder.set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+           .set_desired_present_mode(present_mode)
+           .set_desired_extent(width, height)
+           .set_desired_min_image_count(3)
+           .set_old_swapchain(swapchain_);
+
+    if (!vsync_) {
+        builder.add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR);
+    }
+
+    auto swap_ret = builder.build();
 
     if (!swap_ret) {
         throw std::runtime_error("Failed to create swapchain: " + swap_ret.error().message());

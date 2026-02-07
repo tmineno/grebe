@@ -75,7 +75,7 @@ const char* DecimationThread::mode_name(DecimationMode m) {
 
 void DecimationThread::thread_func() {
     std::vector<int16_t> drain_buf;
-    drain_buf.reserve(16 * 1024 * 1024); // pre-allocate for 16M samples
+    drain_buf.reserve(ring_->capacity()); // pre-allocate to match ring buffer size
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
         // Drain ring buffer

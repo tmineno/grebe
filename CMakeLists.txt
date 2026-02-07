@@ -157,6 +157,8 @@ add_executable(${PROJECT_NAME}
     src/benchmark.cpp
     src/hud.cpp
     src/profiler.cpp
+    src/microbench.cpp
+    src/compute_decimator.cpp
     src/vma_impl.cpp
 )
 

@@ -10,6 +10,18 @@ High-speed time-series data stream visualization using Vulkan.
 
 All other dependencies are fetched automatically via CMake FetchContent.
 
+## Architecture
+
+```
+data_generator (thread) → ring_buffer (SPSC) → decimation_thread → buffer_manager → renderer (LINE_STRIP)
+```
+
+- **Data generator**: Period tiling (memcpy) for periodic waveforms at ≥100 MSPS achieves true 1 GSPS throughput. LUT-based fallback for chirp and low-rate modes.
+- **Ring buffer**: Lock-free SPSC with bulk memcpy push/pop. Configurable size (default 16M, use 64M+ for 1 GSPS).
+- **Decimation**: MinMax (SSE2 SIMD) or LTTB, reducing any input to 3840 vertices/frame.
+- **GPU upload**: Triple-buffered staging → device copy with async transfer.
+- **Renderer**: Vulkan LINE_STRIP pipeline, int16 vertex format (2 bytes/vertex).
+
 ## Build
 
 ```bash
@@ -47,11 +59,17 @@ cmake --build build
 
 # Run automated profiling (headless benchmark), outputs JSON report to ./tmp/
 ./build/vulkan-stream-poc --profile
+
+# Run profiling with larger ring buffer (needed for 1 GSPS)
+./build/vulkan-stream-poc --profile --ring-size=64M
+
+# Run isolated microbenchmarks (BM-A through BM-E), outputs JSON to ./tmp/
+./build/vulkan-stream-poc --bench
 ```
 
 ## Profile Report
 
-`--profile` runs three scenarios (1 MSPS, 10 MSPS, 100 MSPS) with 120 warmup frames and 300 measurement frames each. Results are written to `./tmp/profile_<timestamp>.json`.
+`--profile` runs four scenarios (1 MSPS, 10 MSPS, 100 MSPS, 1 GSPS) with 120 warmup frames and 300 measurement frames each. Results are written to `./tmp/profile_<timestamp>.json`.
 
 Each scenario reports statistics (avg, min, max, p50, p95, p99) for:
 
@@ -70,5 +88,16 @@ Each scenario reports statistics (avg, min, max, p50, p95, p99) for:
 | `ring_fill` | Ring buffer fill ratio (0.0–1.0) |
 
 Each scenario passes if `fps.avg >= 30`. The process exits with code 0 if all scenarios pass, 1 otherwise.
+
+## Microbenchmarks
+
+`--bench` runs isolated benchmarks and writes results to `./tmp/bench_<timestamp>.json`:
+
+| Benchmark | Description |
+|---|---|
+| BM-A | CPU-to-GPU transfer throughput (vkCmdCopyBuffer) at 1/4/16/64 MB |
+| BM-B | Decimation throughput: MinMax (scalar), MinMax (SIMD/SSE2), LTTB |
+| BM-C | GPU draw throughput (V-Sync OFF) at various vertex counts |
+| BM-E | GPU compute shader MinMax decimation (TI-03 experiment) |
 
 See [doc/RDD.md](doc/RDD.md) for full specification.
