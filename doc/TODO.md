@@ -82,21 +82,17 @@
 - [x] `--embedded` フラグで旧 in-process モードを温存
 - [x] E2E 動作確認: IPC / embedded / multi-channel / bench / profile 全モード PASS
 
+### Phase 9: SG 専用 UI と設定モデル
+
+- [x] DataGenerator per-channel waveform 対応 (`set_channel_waveform()`)
+- [x] FrameHeaderV2 に `sample_rate_hz` 追加（grebe-sg → grebe レート自動同期）
+- [x] `grebe-sg` インタラクティブ UI（レート / 波形 / ブロック長 / Pause）
+- [x] `grebe` IPC モードでレート/Pause キー無効化（SG が権限者）
+- [x] E2E 動作確認: IPC / embedded / multi-channel / bench / profile 全モード PASS
+
 ---
 
 ## 次期マイルストーン（実装予定）
-
-### Phase 9: SG 専用 UI と設定モデル
-
-**目標:** `grebe-sg` に操作 UI を追加し、信号設定の責務を分離する。
-**リスク:** 低（ImGui OpenGL backend 準備済み、既存 DataGenerator API を再利用）
-
-- [ ] `grebe-sg` 専用ウィンドウに ImGui UI を実装
-- [ ] グローバル sample rate 設定 UI
-- [ ] Per-channel (1-8ch) waveform 選択 UI
-- [ ] 全ch共通 data length (block_length) 設定（固定長フレーミング）
-- [ ] `grebe` 側 UI を可視化専用に整理（SG 設定責務を除外）
-- [ ] 設定変更を transport 経由で `grebe` に通知
 
 ### Phase 10: Shared Memory IPC 基盤
 
