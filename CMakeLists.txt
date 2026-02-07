@@ -51,6 +51,9 @@ include(FetchContent)
 # Vulkan SDK (must be installed)
 find_package(Vulkan REQUIRED)
 
+# OpenGL (for grebe-sg signal gateway UI)
+find_package(OpenGL REQUIRED)
+
 # GLFW
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -137,6 +140,21 @@ target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 target_link_libraries(imgui_lib PUBLIC glfw Vulkan::Vulkan)
+
+# Dear ImGui library (OpenGL3 backend, for grebe-sg)
+add_library(imgui_opengl_lib STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui_opengl_lib PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(imgui_opengl_lib PUBLIC glfw OpenGL::GL)
 
 # =============================================================================
 # Shader compilation
