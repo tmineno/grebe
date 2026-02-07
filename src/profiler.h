@@ -80,6 +80,7 @@ public:
 
 private:
     static MetricStats compute_stats(const std::vector<double>& values);
+    void build_scenarios();
 
     std::vector<ScenarioConfig> scenarios_;
     std::vector<ScenarioResult> results_;
@@ -89,5 +90,6 @@ private:
     int frame_in_scenario_ = 0;
     bool finished_ = false;
     bool scenario_started_ = false;
+    bool scenarios_built_ = false;
     uint32_t channel_count_ = 1;
 };

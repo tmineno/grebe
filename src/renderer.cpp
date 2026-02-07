@@ -5,6 +5,7 @@
 #include "hud.h"
 
 #include <spdlog/spdlog.h>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 
@@ -259,8 +260,9 @@ void Renderer::create_framebuffers(VkDevice device, Swapchain& swapchain) {
 
 void Renderer::create_pipeline(VkDevice device, const std::string& shader_dir) {
     // Load shaders
-    auto vert_module = load_shader_module(device, shader_dir + "/waveform.vert.spv");
-    auto frag_module = load_shader_module(device, shader_dir + "/waveform.frag.spv");
+    namespace fs = std::filesystem;
+    auto vert_module = load_shader_module(device, (fs::path(shader_dir) / "waveform.vert.spv").string());
+    auto frag_module = load_shader_module(device, (fs::path(shader_dir) / "waveform.frag.spv").string());
 
     VkPipelineShaderStageCreateInfo vert_stage = {};
     vert_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

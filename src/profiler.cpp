@@ -13,12 +13,20 @@
 #include <fstream>
 #include <numeric>
 
-ProfileRunner::ProfileRunner() {
+ProfileRunner::ProfileRunner() {}
+
+void ProfileRunner::build_scenarios() {
+    if (scenarios_built_) return;
+    scenarios_built_ = true;
+
+    std::string prefix = channel_count_ > 1
+        ? std::to_string(channel_count_) + "ch\xc3\x97" : "";  // UTF-8 ×
+
     scenarios_ = {
-        {"1 MSPS",   1'000'000.0,   120, 300, 30.0},
-        {"10 MSPS",  10'000'000.0,  120, 300, 30.0},
-        {"100 MSPS", 100'000'000.0, 120, 300, 30.0},
-        {"1 GSPS",   1'000'000'000.0, 120, 300, 30.0},
+        {prefix + "1MSPS",   1'000'000.0,   120, 300, 30.0},
+        {prefix + "10MSPS",  10'000'000.0,  120, 300, 30.0},
+        {prefix + "100MSPS", 100'000'000.0, 120, 300, 30.0},
+        {prefix + "1GSPS",   1'000'000'000.0, 120, 300, 30.0},
     };
 }
 
@@ -31,6 +39,8 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              DataGenerator& data_gen, DecimationThread& dec_thread,
                              GLFWwindow* window) {
     if (finished_) return;
+
+    build_scenarios();
 
     const auto& scenario = scenarios_[current_scenario_];
 

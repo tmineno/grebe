@@ -4,7 +4,7 @@
 #include <cmath>
 #include <limits>
 
-#ifdef __SSE2__
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
 #endif
 
@@ -58,7 +58,7 @@ std::vector<int16_t> Decimator::minmax_scalar(const std::vector<int16_t>& input,
     return output;
 }
 
-#ifdef __SSE2__
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 
 // SSE2 horizontal min of 8 x int16 packed in __m128i
 static inline int16_t hmin_epi16(__m128i v) {
@@ -145,7 +145,7 @@ std::vector<int16_t> Decimator::minmax(const std::vector<int16_t>& input, uint32
     return minmax_scalar(input, target_points);
 }
 
-#endif // __SSE2__
+#endif // SSE2
 
 std::vector<int16_t> Decimator::lttb(const std::vector<int16_t>& input, uint32_t target_points) {
     if (target_points < 3) return {};

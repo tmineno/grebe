@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -68,7 +69,7 @@ void ComputeDecimator::init(VulkanContext& ctx, const std::string& shader_dir) {
     }
 
     // --- Shader module ---
-    std::string spv_path = shader_dir + "/minmax_decimate.comp.spv";
+    std::string spv_path = (std::filesystem::path(shader_dir) / "minmax_decimate.comp.spv").string();
     auto code = read_file(spv_path);
 
     VkShaderModuleCreateInfo sm_info = {};
