@@ -59,62 +59,93 @@
 - MSVC SIMD 特性: 10.5x 高速化率 (GCC は auto-vectorize で 1.1x)
 - 全プロファイル PASS
 
+### Phase 7.5: Phase 8 事前リファクタ
+
+- [x] exe名を `grebe` に統一、Windows スクリプト修正
+- [x] Command DTO + `AppCommandQueue` 導入（key_callback/profiler の直接参照排除）
+- [x] ProfileRunner を `AppCommandQueue` 経由に変更
+- [x] `main.cpp` 責務分離（`cli.h/cpp` + `app_loop.h/cpp`）
+- [x] Per-channel `DropCounter`（drop/backpressure メトリクス）
+- [x] `RingBufferView<T>` 導入（共有メモリ対応のための raw pointer 抽象化）
+- [x] CMake を `grebe_common` (STATIC) + `grebe` (exe) に再編
+- [x] ImGui OpenGL backend ターゲット追加（`imgui_opengl_lib`）
+- [x] Cross-platform `ProcessHandle`（fork/exec + CreateProcess）
+
+### Phase 8: 実行バイナリ分離 (`grebe` / `grebe-sg`)
+
+- [x] IPC 契約型定義（`FrameHeaderV2`, `IpcCommand`）を `src/ipc/contracts.h` に配置
+- [x] Transport 抽象 I/F（`ITransportProducer` / `ITransportConsumer`）を `src/ipc/transport.h` に定義
+- [x] Pipe transport（匿名パイプ stdin/stdout）実装（`PipeProducer` / `PipeConsumer`）
+- [x] `ProcessHandle::spawn_with_pipes()` によるパイプ付きプロセス起動
+- [x] `grebe-sg` 実行バイナリ（DataGenerator + sender thread + ImGui ステータス窓 + headless fallback）
+- [x] `grebe` IPC 統合（receiver thread → local ring buffer → 既存 DecimationThread）
+- [x] `--embedded` フラグで旧 in-process モードを温存
+- [x] E2E 動作確認: IPC / embedded / multi-channel / bench / profile 全モード PASS
+
 ---
 
 ## 次期マイルストーン（実装予定）
 
-### Phase 7.5: Phase 8 事前リファクタ（低リスク化）
+### Phase 9: SG 専用 UI と設定モデル
 
-- [ ] `src/main.cpp` の責務分離（CLI解析 / 実行モード選択 / ランタイムループ / 入力ハンドラを分離）
-- [ ] `DataGenerator` / `DecimationThread` 直接参照に依存しない制御I/F導入（command DTO化）
-- [ ] profile制御を in-process オブジェクト参照から分離（IPC/外部制御へ移行可能な構造へ）
-- [ ] 共有メモリ向け ring 実装の独立化（`std::vector` 依存の現行 `RingBuffer` から分離）
-- [ ] channel単位の drop/backpressure メトリクスを明示収集（生成側/消費側の整合確認）
-- [ ] CMake を multi-binary 前提に再編（`grebe` / `grebe-sg` / 共通 `ipc` ライブラリ）
-- [ ] SG UI 用の ImGui OpenGL backend ターゲット追加（`imgui_impl_opengl3`）
-- [ ] Windows スクリプトの実行ファイル名ハードコード解消（`vulkan-stream-poc.exe` 依存除去）
-- [ ] parent/child プロセス管理ユーティリティ整備（spawn/attach/監視/終了ハンドリング）
+**目標:** `grebe-sg` に操作 UI を追加し、信号設定の責務を分離する。
+**リスク:** 低（ImGui OpenGL backend 準備済み、既存 DataGenerator API を再利用）
 
-### Phase 8: 実行バイナリ分離 (`grebe` / `grebe-sg`)
-
-- [ ] `grebe` (可視化メイン) と `grebe-sg` (信号生成) の 2 実行バイナリ化
-- [ ] 共通契約（`SignalConfigV2` / `FrameHeaderV2` / transport I/F）を `src/ipc` へ分離
-- [ ] `grebe` から `grebe-sg` 起動制御の基盤を実装
-- [ ] Phase 8 完了時点で最小E2E動作を満たす暫定 transport（stub/pipe/最小shm のいずれか）を実装
-
-### Phase 9: 起動モードと Shared Memory 基盤
-
-- [ ] デフォルト: `grebe` が `grebe-sg` を自動起動
-- [ ] `--attach-sg` による既存 `grebe-sg` 接続モード
-- [ ] Shared memory + `memcpy` IPC を実装（初期ベースライン）
-- [ ] ControlBlockV2 (`grebe-ipc-ctrl`) + generation/heartbeat による discovery/recovery
-- [ ] ConsumerStatusBlockV2 (`grebe-ipc-cons`) + credit window 制御
-- [ ] DataRing 固定長 v2 パラメータ（block_length=65536, slots=64）
-- [ ] loss-tolerant realtime 方針 (credit 枯渇時 drop-new)
-- [ ] 基本メトリクス（throughput/drop/enqueue/dequeue/inflight/credits）
-- [ ] FrameHeaderV2 header CRC 検証
-- [ ] `grebe-sg` 再起動時の再接続/復旧を実装
-- [ ] 設定変更は generation bump 経由のみ（in-place config 書き換え禁止）
-- [ ] 世代切替時の旧 shared memory segment cleanup（unlink/close + best-effort detach）
-
-### Phase 10: SG 専用 UI と設定モデル
-
-- [ ] `grebe-sg` 専用ウィンドウ（SG UI）を実装
-- [ ] グローバル sample rate 設定
-- [ ] per-channel (1-8ch) modulation/waveform 設定
-- [ ] v2 は全ch共通 data length 設定（可変 per-channel は後続へ延期）
+- [ ] `grebe-sg` 専用ウィンドウに ImGui UI を実装
+- [ ] グローバル sample rate 設定 UI
+- [ ] Per-channel (1-8ch) waveform 選択 UI
+- [ ] 全ch共通 data length (block_length) 設定（固定長フレーミング）
 - [ ] `grebe` 側 UI を可視化専用に整理（SG 設定責務を除外）
+- [ ] 設定変更を transport 経由で `grebe` に通知
+
+### Phase 10: Shared Memory IPC 基盤
+
+**目標:** Pipe transport を Shared Memory に置換し、高スループット IPC を実現する。
+**リスク:** 高（OS API 依存、同期プリミティブ、障害復旧の複雑さ）
+
+Phase 10 は段階的に実装し、各ステップで動作確認を行う:
+
+#### 10a: 基本 Shared Memory Ring
+
+- [ ] POSIX shm_open / Win32 CreateFileMapping の抽象化
+- [ ] `DataRingV2` 固定長リング実装（block_length=65536, slots=64）
+- [ ] `FrameHeaderV2` header + channel-major payload 書き込み/読み出し
+- [ ] FrameHeaderV2 header CRC32C 検証
+
+#### 10b: 制御ブロックと Discovery
+
+- [ ] `ControlBlockV2` (`grebe-ipc-ctrl`): magic/abi_version/generation/heartbeat/config
+- [ ] `ConsumerStatusBlockV2` (`grebe-ipc-cons`): read_sequence/credits/heartbeat
+- [ ] `grebe` 起動時の ControlBlock 読み取り → DataRing attach フロー
+- [ ] `--attach-sg` による既存 `grebe-sg` 接続モード
+
+#### 10c: フロー制御と障害復旧
+
+- [ ] Credit-based window 制御（inflight < credits_granted で publish 許可）
+- [ ] Credit 枯渇時 drop-new（loss-tolerant realtime）
+- [ ] Producer/Consumer heartbeat 監視 + timeout 検出
+- [ ] `grebe-sg` 再起動時の再接続/復旧（generation bump → reattach）
+- [ ] 世代切替時の旧 shared memory segment cleanup（unlink/close + best-effort detach）
+- [ ] 設定変更は generation bump 経由のみ（in-place config 書き換え禁止）
+- [ ] 基本メトリクス（throughput/drop/enqueue/dequeue/inflight/credits）
 
 ### Phase 11: トランスポート計測とプロファイル統合
 
-- [ ] SG timestamp → grebe render timestamp の E2E delta を計測
-- [ ] `--profile` JSON/CSV に transport メトリクスを追加
+**目標:** IPC パフォーマンスを定量計測し、既存プロファイル基盤に統合する。
+**リスク:** 低（計測コード追加が主、既存動作への影響なし）
 
-### Phase 12: 外部I/F評価向け拡張点
+- [ ] SG timestamp → grebe render timestamp の E2E delta 計測
+- [ ] `--profile` JSON/CSV に transport メトリクス追加
+- [ ] Shared Memory baseline 計測値の記録
 
-- [ ] トランスポート差し替え可能な抽象I/Fを確定
+### Phase 12: 外部 I/F 評価向け拡張点
+
+**目標:** Transport 差し替え可能な構造を確定し、評価用シミュレータを追加する。
+**リスク:** 低〜中（抽象 I/F は Phase 8 で導入済み、シミュレータは新規）
+
+- [ ] トランスポート差し替え可能な抽象 I/F を確定（Phase 8 の I/F を最終化）
 - [ ] 帯域制限/遅延注入可能なシミュレータバックエンドを追加
-- [ ] shared_mem ベースラインとの差分比較レポートを整備
+- [ ] Shared Memory ベースラインとの差分比較レポートを整備
 
 ---
 
