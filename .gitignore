@@ -1,0 +1,26 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Compiled shaders (generated)
+*.spv
+
+# tmp directory
+tmp/
+
+# Claude Code
+.claude/
+
+# ImGui
+imgui.ini
