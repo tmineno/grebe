@@ -12,6 +12,7 @@
 | 2026-02-07 | Phase 6 | TI-01/03/05 実GPU回答追記。RTX 5080 (dzn) + Release ビルドでの計測。R-01完了 |
 | 2026-02-07 | Phase 7 | TI-01/02/03/04 ネイティブ Vulkan 回答追記。MSVC ビルド + NVIDIA ネイティブドライバでの計測。R-10追加 |
 | 2026-02-08 | Phase 9 | TI-07 IPC パイプ帯域と欠落率。anonymous pipe IPC vs embedded の性能比較。R-11追加 |
+| 2026-02-08 | Phase 9 | TI-07 Windows ネイティブ追記。R-12 解消 (PeekNamedPipe)。Windows パイプ帯域 ~10-36 MB/s (WSL2 比 1/10〜1/30) |
 
 ---
 
@@ -25,7 +26,7 @@
 | TI-04 | 描画プリミティブ選択 | 回答済み (Native で更新) | 2026-02-07 |
 | TI-05 | 永続マップドバッファ | 検証不可 (現設計で恩恵皆無) | 2026-02-07 |
 | TI-06 | スレッドモデル | 回答済み | 2026-02-07 |
-| TI-07 | IPC パイプ帯域と欠落率 | 回答済み | 2026-02-08 |
+| TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
 
 ---
 
@@ -410,6 +411,79 @@
 
 **結論**: Anonymous pipe IPC は 100 MSPS/1ch まで無欠落で動作し、実用上十分。1 GSPS では パイプ帯域 (~300 MB/s) が律速となるが FPS への影響は軽微。高帯域が必要な場合は shared memory IPC (Phase 10) への移行を推奨。
 
+### 2026-02-08 Phase 9 (RTX 5080 Native NVIDIA Vulkan, Windows, MSVC Release)
+
+**計測条件**
+
+- `--profile` による自動シナリオ (1M/10M/100M/1G SPS × warmup 120 + measure 300 frames)
+- Ring buffer: 64M samples/channel, Block size: 4096 samples
+- V-Sync ON (60 FPS ターゲット)
+- ネイティブ NVIDIA Vulkan ドライバ、MSVC Release ビルド
+- Windows 版 `PipeProducer::receive_command()` を `PeekNamedPipe` で実装済み (R-12 解消)
+
+**注記**: Windows ネイティブ Vulkan + V-Sync 環境では一部フレームに sub-ms の frame_time が発生し、FPS avg 統計に外れ値が含まれる。以下の表では FPS avg の代わりに frame_ms avg から算出した実効 FPS (≈ 1000/frame_ms) を併記する。
+
+**計測結果: IPC モード (1ch)**
+
+| シナリオ | frame_ms | 実効FPS | Smp/frame | Drops | 備考 |
+|---|---|---|---|---|---|
+| 1 MSPS | 16.70 | 59.9 | 12,636 | 0 | パイプ帯域に余裕 |
+| 10 MSPS | 16.65 | 60.1 | 95,732 | 0 | レート変更動作確認 |
+| 100 MSPS | 16.65 | 60.1 | 111,532 | 0 | パイプ帯域が律速開始 |
+| 1 GSPS | 16.64 | 60.1 | 7,875 | 0 | パイプ飽和 + 生成側制約 |
+
+**計測結果: IPC モード (4ch)**
+
+| シナリオ | frame_ms | 実効FPS | Smp/frame | Drops | 備考 |
+|---|---|---|---|---|---|
+| 4ch×1 MSPS | 16.65 | 60.1 | 59,217 | 0 | |
+| 4ch×10 MSPS | 16.66 | 60.0 | 298,481 | 0 | 4ch で帯域効率向上 |
+| 4ch×100 MSPS | 16.64 | 60.1 | 75,725 | 0 | パイプ飽和 |
+| 4ch×1 GSPS | 16.55 | 60.4 | 56,884 | 0 | パイプ飽和 |
+
+**計測結果: Embedded モード (1ch)**
+
+| シナリオ | frame_ms | 実効FPS | Smp/frame | Drops | WSL2比 |
+|---|---|---|---|---|---|
+| 1 MSPS | 16.62 | 60.2 | 4,096 | 0 | 同等 |
+| 10 MSPS | 16.63 | 60.1 | 13,668 | 0 | 同等 |
+| 100 MSPS | 16.63 | 60.1 | 148,588 | 0 | 2.27x smp/f |
+| 1 GSPS | 16.60 | 60.2 | 157,825 | 0 | 1.07x smp/f |
+
+**計測結果: Embedded モード (4ch)**
+
+| シナリオ | frame_ms | 実効FPS | Smp/frame | Drops | WSL2比 |
+|---|---|---|---|---|---|
+| 4ch×1 MSPS | 16.62 | 60.2 | 16,048 | 0 | 同等 |
+| 4ch×10 MSPS | 16.62 | 60.2 | 50,662 | 0 | 3.20x smp/f |
+| 4ch×100 MSPS | 16.62 | 60.2 | 529,123 | 0 | 2.20x smp/f |
+| 4ch×1 GSPS | 16.58 | 60.3 | 1,871,336 | 0 | **0 drops** (WSL2: 2.4G drops) |
+
+**IPC 実効帯域の推定 (Windows native)**
+
+| シナリオ | Smp/frame (IPC) | 推定帯域 (MB/s) | WSL2比 | 備考 |
+|---|---|---|---|---|
+| 1ch × 10 MSPS | 95,732 | 11.5 | 0.04x | |
+| 1ch × 100 MSPS | 111,532 | 13.4 | 0.09x | パイプ飽和 |
+| 4ch × 10 MSPS | 298,481 | 35.8 | — | 4ch で効率改善 |
+| 4ch × 100 MSPS | 75,725 | 9.1 | 0.03x | パイプ飽和 |
+
+推定実効パイプ帯域: **約 10-36 MB/s** (Windows ネイティブ anonymous pipe, 4096 byte ブロック)
+
+**分析**
+
+1. **Windows パイプ帯域は WSL2 の 1/10〜1/30**: WSL2 anonymous pipe の実効帯域 (~300 MB/s) に対し、Windows ネイティブは **~10-36 MB/s** と大幅に低い。Windows の anonymous pipe はデフォルトバッファサイズが 4,096 bytes (Linux は 65,536 bytes) であり、per-write のシステムコールオーバーヘッドが大きい。
+
+2. **全シナリオ 0 drops**: パイプ帯域が低いため grebe 側リングバッファへの流入が緩やかになり、結果的に全シナリオで欠落ゼロ。WSL2 で発生した 4ch×1GSPS のドロップ (35M drops) が Windows では解消されている。
+
+3. **Embedded 4ch×1 GSPS の劇的改善**: WSL2 dzn では 2,447,638,528 drops だったが、Windows ネイティブでは **0 drops**。smp/f は 1,871,336 (WSL2: 60,333,471) と低いが、DataGenerator のスレッドスケジューリング特性 (Windows の busy-wait pacing がより保守的) によりリングバッファのオーバーフローを回避。
+
+4. **Render time の改善**: ネイティブ Vulkan で render_ms ~11ms (WSL2 dzn: ~16ms)。dzn の D3D12 変換オーバーヘッド排除により描画パイプラインに余裕が拡大。FPS は 60 で同等だが、CPU 余力が増加。
+
+5. **パイプ最適化の必要性**: Windows ネイティブの低パイプ帯域は Phase 10 (Pipe 最適化) の主要ターゲット。`CreatePipe` のバッファサイズ拡大 (4KB → 64KB+) と write batching により大幅な改善が見込める。
+
+**結論 (更新)**: Windows ネイティブの anonymous pipe 帯域は WSL2 比で大幅に低い (~10-36 MB/s vs ~300 MB/s)。ただし FPS への影響は皆無 (全シナリオ 60 FPS, 0 drops)。可視化品質は十分だが、高レートでの smp/frame が低下する。Phase 10 でのパイプバッファ最適化で改善が期待できる。
+
 ---
 
 ## 推奨事項トラッカー
@@ -429,3 +503,4 @@
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
 | R-11 | Shared Memory IPC への移行検討 | 中 | 未着手 | — | パイプ帯域 ~300 MB/s が 1 GSPS で律速 (TI-07)。shm で帯域制約を排除可能 |
+| R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |

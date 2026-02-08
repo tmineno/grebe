@@ -5,6 +5,8 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #else
 #include <cerrno>
 #include <cstring>
@@ -79,12 +81,19 @@ bool PipeProducer::send_frame(const FrameHeaderV2& header, const void* payload) 
 
 bool PipeProducer::receive_command(IpcCommand& cmd) {
 #ifdef _WIN32
-    // Non-blocking check not trivially available on Windows pipes;
-    // use a small peek or just try to read with timeout=0.
-    // For Phase 8 stub, use blocking read in a separate thread.
-    // Here we return false (no command) to avoid blocking.
-    (void)cmd;
-    return false;
+    HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(read_fd_));
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) return false;
+    if (avail < sizeof(IpcCommand)) return false;
+
+    if (!read_all(read_fd_, &cmd, sizeof(cmd))) return false;
+    if (cmd.magic != IPC_COMMAND_MAGIC) {
+        spdlog::warn("PipeProducer: invalid command magic 0x{:08x}", cmd.magic);
+        return false;
+    }
+    return true;
 #else
     struct pollfd pfd{};
     pfd.fd = read_fd_;
