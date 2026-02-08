@@ -179,6 +179,24 @@ Phase 11 は段階的に実装し、各ステップで動作確認を行う:
 
 **受入条件:** `--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
 
+### Phase 14: Trigger 捕捉と波形整合性保証（SG/Main 同期）
+
+**目標:** SG 側 trigger 判定と Main 側 frame validity 判定を統合し、表示フレームの時間整合性・非破損性を定量保証する。  
+**リスク:** 中（データ経路に capture metadata と判定ロジックを追加）
+
+- [ ] SG 側 trigger mode 実装（internal / external / timer fallback）
+- [ ] internal trigger パラメータ実装（level, edge, pre-trigger, post-trigger）
+- [ ] capture window 境界メタデータを IPC header/telemetry に追加
+- [ ] Main 側 frame validity 判定を実装（sequence continuity, CRC, window coverage）
+- [ ] invalid frame の HUD/ログ明示（silent success 禁止）
+- [ ] 品質メトリクス実装（envelope mismatch, peak miss rate, extremum error p50/p95/p99）
+- [ ] profile レポートに trigger/validity 指標を統合（viewer drops と SG drops を分離表示）
+
+**受入条件:**
+- trigger lock 後の valid frame 率を継続計測できること
+- timer モードで window coverage 下限しきい値（例: 95%）を監視できること
+- IPC/embedded 比較で、FPS/頂点数に加えて波形整合性メトリクスで品質判定できること
+
 ---
 
 ## 将来拡張（PoC 後の検討事項）
@@ -197,7 +215,7 @@ Phase 11 は段階的に実装し、各ステップで動作確認を行う:
 
 - 実デバイス接続（PCIe DMA / USB3 / 10GbE）
 - ウォーターフォール / スペクトログラム表示
-- トリガ機能（レベル/エッジ/パターントリガ）
+- 高度トリガ機能（パターントリガ等）
 - データ録画・再生
 - GUI フレームワーク統合（Qt / ImGui 本格UI）
 - リモート表示（WebSocket 経由ブラウザ表示）

@@ -1,7 +1,7 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.3.0
-**最終更新:** 2026-02-07
+**バージョン:** 1.4.0
+**最終更新:** 2026-02-08
 
 ---
 
@@ -276,6 +276,20 @@ v2 既定値:
 | 通知 | poll + optional doorbell | NVMe/xHCI |
 | 信頼性 | loss-tolerant realtime + drop accounting | UDP realtime profile |
 
+### 3.5 トリガベース捕捉と同期整合性（SG/Main 両側）
+
+表示フレームの時間整合性を確保するため、`grebe-sg` と `grebe` の双方で
+trigger-aware な捕捉を行う。
+
+- SG 側（source authority）:
+  - internal trigger / external trigger / periodic timer を提供する
+  - trigger 判定は SG のサンプル生成クロック上で実施する
+  - capture window（pre/post trigger）単位でデータを送出し、境界情報を付与する
+- Main 側（render authority）:
+  - 受信した capture 境界と sequence 連続性を検証する
+  - frame validity を判定し、invalid frame を明示表示する
+  - timer fallback 時は window coverage を品質指標として継続監視する
+
 ---
 
 ## 4. 機能要件
@@ -347,6 +361,11 @@ v2 既定値:
 | Swap Time | ms | バッファ切替時間 |
 | Render Time | ms | 描画実行時間 |
 | Samples/Frame | count | フレームあたりの入力サンプル数 |
+| Trigger Mode | enum | internal / external / timer |
+| Trigger Lock | bool | trigger成立状態（armed/locked） |
+| Frame Validity | enum / % | valid/invalid と valid frame 比率 |
+| Window Coverage | % | capture window 充足率 |
+| SG Drops | count | SG 側で発生した累積ドロップ |
 
 ### FR-07: マルチチャンネル表示
 
@@ -378,6 +397,10 @@ v2 既定値:
 - **FR-09.4:** 各チャンネルごとに modulation/waveform を独立設定可能にする
 - **FR-09.5:** data length (block length) は初期実装で全チャンネル共通値とする（固定長フレーミング）
 - **FR-09.6:** 各チャンネル独立の可変 data length は拡張要件として後続フェーズで扱う
+- **FR-09.7:** SG 側に trigger mode 設定を追加する（internal / external / periodic timer）
+- **FR-09.8:** internal trigger は level/edge（rising/falling/both）を設定可能にする
+- **FR-09.9:** SG 側は trigger をサンプル生成クロックで判定し、capture window 境界を IPC で通知する
+- **FR-09.10:** external trigger 未入力時は periodic timer へフォールバック可能にする（設定で有効/無効）
 
 ### FR-10: トランスポート抽象化と計測
 
@@ -399,6 +422,21 @@ v2 既定値:
 - **FR-10.9:** 初期実装時点で最低限の transport 指標（throughput, drop rate, enqueue/dequeue, inflight depth, credits utilization）を計測する
 - **FR-10.10:** E2E timestamp delta と `--profile` JSON/CSV 統合は後続フェーズで追加する
 - **FR-10.11:** config 更新は generation bump 経由のみ許可し、in-place config 書き換えは行わない
+- **FR-10.12:** trigger/capture 境界メタデータ（trigger mode, trigger ts, capture boundary）を伝搬可能にする
+
+### FR-11: フレーム有効性判定と波形整合性
+
+- **FR-11.1:** Main 側で frame validity 判定を必須化する（valid / invalid）
+- **FR-11.2:** validity 判定条件として以下を最低限含める
+  - sequence continuity（欠落検知）
+  - CRC 検証（header/payload）
+  - capture window 充足率（不足時 invalid）
+- **FR-11.3:** invalid frame は HUD/ログ/プロファイルで明示し、silent success を禁止する
+- **FR-11.4:** 頂点数/FPSとは独立に、波形整合性メトリクスを評価する
+  - envelope mismatch rate（Embedded 参照比較）
+  - peak miss rate
+  - extremum amplitude error（p50/p95/p99）
+- **FR-11.5:** viewer drops と SG drops を別系統で記録し、品質判定に反映する
 
 ---
 
@@ -428,6 +466,12 @@ v2 既定値:
 - データ生成からピクセル表示までの E2E レイテンシを計測する
 - 目標: L1 で 50ms 以下、L2 で 100ms 以下
 - 推定: ring buffer + ダブルバッファ + V-Sync の 3 フレーム分 ≈ 50ms
+
+### NFR-02b: トリガ整合性
+
+- trigger lock 後の invalid frame 率を継続監視する
+- periodic timer モードでは window coverage の下限しきい値を定義する（例: 95%）
+- PoC 判定は FPS/頂点数に加えて FR-11.4 の整合性メトリクスを含める
 
 ### NFR-03: メモリ使用量
 
@@ -500,6 +544,10 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | `--attach-sg` | `grebe-sg` を自動起動せず既存プロセスへ接続 |
 | `--sg-path=<path>` | 自動起動時に使用する `grebe-sg` 実行ファイルパス |
 | `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
+| `--trigger-mode=<internal\|external\|timer>` | 捕捉モード指定（デフォルト: timer） |
+| `--pre-trigger=<samples>` | pre-trigger サンプル数 |
+| `--post-trigger=<samples>` | post-trigger サンプル数 |
+| `--timer-period-ms=<ms>` | periodic timer 捕捉周期 |
 
 ### CLI オプション (`grebe-sg`)
 
@@ -509,6 +557,11 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | `--sample-rate=<Hz>` | グローバルサンプルレート初期値 |
 | `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
 | `--segment-name=<name>` | IPC 共有メモリ名 |
+| `--trigger-mode=<internal\|external\|timer>` | SG 側 trigger モード |
+| `--trigger-level=<int16>` | internal trigger 閾値 |
+| `--trigger-edge=<rising\|falling\|both>` | internal trigger エッジ条件 |
+| `--timer-period-ms=<ms>` | timer trigger 周期 |
+| `--ext-trigger-source=<name>` | external trigger 入力源（将来拡張予約） |
 
 ---
 
@@ -535,6 +588,7 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | LTTB が高レートで追いつかない | 描画落ち | **対策済み**: ≥100 MSPS で自動無効化 |
 | 親子プロセス管理の複雑化 | 起動失敗/孤児プロセス | **要対策**: spawn/attach 両経路の状態遷移を明文化 |
 | IPC 同期不整合（seq 欠落、再接続） | データ欠損/停止 | **要対策**: sequence + timestamp + timeout/reconnect |
+| トリガ未ロック/誤トリガ | 無効波形表示 | **要対策**: SG側trigger判定 + Main側validity判定 + timer fallback |
 
 ---
 
