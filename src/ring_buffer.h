@@ -23,6 +23,7 @@ public:
     size_t push_bulk(const T* data, size_t n)  { return view_.push_bulk(data, n); }
     bool pop(T& item)                          { return view_.pop(item); }
     size_t pop_bulk(T* out, size_t max_count)  { return view_.pop_bulk(out, max_count); }
+    size_t discard_bulk(size_t max_count)      { return view_.discard_bulk(max_count); }
 
     size_t size()       const { return view_.size(); }
     size_t capacity()   const { return view_.capacity(); }

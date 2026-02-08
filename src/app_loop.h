@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -32,6 +33,7 @@ struct AppComponents {
     ProfileRunner* profiler;
     std::vector<DropCounter*> drop_counters;
     uint32_t num_channels;
+    size_t ring_capacity_samples = 0;     // per-channel ring capacity (samples)
     bool enable_profile;
     // IPC mode fields (non-null when not embedded)
     ITransportConsumer* transport = nullptr;

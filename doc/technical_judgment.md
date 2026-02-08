@@ -20,6 +20,7 @@
 | 2026-02-08 | Phase 11 | TI-10 波形表示整合性検証。Envelope 検証 100%、sequence continuity、window coverage 計測。R-15 完了 |
 | 2026-02-08 | Phase 11b | TI-10 再計測。FPS harmonic mean 修正、envelope verifier 最適化 (sorted vector + build-once)、barrier→CV sync、4ch stuttering 修正。R-16 追加 |
 | 2026-02-08 | Phase 11b | TI-10 IPC ボトルネック分析追記。period buffer 未参照・SG drops・bucket サイズ不確定性の 3 層構造を整理。R-16 優先度引き上げ、R-17 追加 |
+| 2026-02-08 | Phase 11e | TI-10 追記。Main Viewer UI 改善（軸表示/time span 設定/SG 周波数設定）後の挙動検証を記録 |
 
 ---
 
@@ -36,7 +37,7 @@
 | TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
 | TI-08 | IPC ボトルネック再評価と次ステップ判定 | 回答済み | 2026-02-08 |
 | TI-09 | SG-side drop 評価と緩和策 | 回答済み | 2026-02-08 |
-| TI-10 | 波形表示整合性検証 | 回答済み | 2026-02-08 |
+| TI-10 | 波形表示整合性検証（UI 改善後追記含む） | 回答済み | 2026-02-08 |
 
 ---
 
@@ -1033,6 +1034,42 @@ Embedded 4ch:
 2. **IPC 経由 period buffer 伝送**: grebe-sg が scenario 開始時に period buffer を IPC コマンドチャネルで送信。period_len は最大 ~5556 samples (1 MSPS/180 Hz) のため、伝送量は ≤11 KB/scenario で帯域影響は無視可能。
 
 **判定**: アプローチ 1 (再構築) が PoC に適合。波形生成ロジックの共通化は `grebe_common` ライブラリで実現可能。アプローチ 2 は IPC プロトコル拡張が必要だが、堅牢性が高い。
+
+### 2026-02-08 Phase 11e: Main Viewer UI 改善後の挙動検証
+
+**目的**
+
+Phase 11e で導入した UI 機能（amplitude/time 軸、time span 設定、SG periodic frequency 設定）が、表示整合性と操作性を維持したまま動作することを確認する。
+
+**実装要点（検証対象）**
+
+1. HUD に amplitude/time 軸を追加し、raw int16 ラベルを表示。
+2. 波形描画領域を HUD 側で定義し、renderer の viewport/scissor で軸外描画をクリップ。
+3. Main 右側に config pane を追加し、time span up/down を配置。
+4. Decimation を「最新チャンク」から「latest history window」方式に変更し、10ms 超の span でも表示長が伸長するよう修正。
+5. time span 上限/下限を `sample_rate` と ring capacity から動的導出。
+6. SG UI に periodic waveform 用 frequency (Hz) 設定を追加し、周波数を sample rate 変更から独立化。
+
+**検証結果**
+
+| 観点 | 結果 | 備考 |
+|---|---|---|
+| Build | PASS | `cmake --preset linux-release` + `cmake --build --preset linux-release -j` 成功 |
+| 波形の軸外描画 | PASS | viewport/scissor により軸領域外の描画を抑制 |
+| time span > 10ms 反映 | PASS | 20ms@1MSPS で decimation window が 20,000 samples まで拡張 |
+| sample rate 変更時の周期整合 | PASS | 1kHz 固定時、1MSPS→10MSPS で period samples が 1,000→10,000 に変化（time 軸上の周期時間は不変） |
+| time span 上下限 | PASS | `min=max(1/rate, 64/rate)`, `max=0.95*ring_capacity/rate` で動的制約 |
+| 手動確認（UI） | PASS | Main config pane で span 変更即時反映、軸表示の視認性を確認済み |
+
+**分析**
+
+1. 初期不具合（軸外描画、sample rate 連動の見かけ周期変化、10ms 超 span 未反映）は、描画領域クリップ・frequency 独立化・history window 化で再現しなくなった。
+2. time span の動的上限/下限により、低レート/高レート両方で非現実的な設定値を防止できる。
+3. UI 変更は描画パイプライン本体を置換せずに統合されており、既存モード（embedded / IPC）と整合する。
+
+**結論**
+
+Phase 11e の受入観点（軸表示、time span 可変、操作 UI、frequency 設定）は満たされた。TI-10 の「波形表示整合性」範囲に、可視 window 制御と表示系 UI の整合性検証を追加完了とする。
 
 ---
 

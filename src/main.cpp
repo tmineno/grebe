@@ -278,6 +278,7 @@ int main(int argc, char* argv[]) {
         app.profiler = &profiler;
         app.drop_counters = drop_ptrs;
         app.num_channels = opts.num_channels;
+        app.ring_capacity_samples = opts.ring_size;
         app.enable_profile = opts.enable_profile;
         app.transport = pipe_consumer.get();  // nullptr in embedded mode
         app.current_sample_rate.store(1e6, std::memory_order_relaxed);

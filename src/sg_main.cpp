@@ -12,8 +12,10 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -27,6 +29,7 @@
 struct SgOptions {
     uint32_t num_channels = 1;
     double   sample_rate  = 1'000'000.0;
+    double   frequency_hz = 1'000.0;
     size_t   ring_size    = 67'108'864;  // 64M samples
     uint32_t block_size   = 16384;       // IPC block size (samples/channel/frame)
 };
@@ -43,6 +46,8 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
             opts.num_channels = static_cast<uint32_t>(n);
         } else if (arg.rfind("--sample-rate=", 0) == 0) {
             opts.sample_rate = std::stod(arg.substr(14));
+        } else if (arg.rfind("--frequency=", 0) == 0) {
+            opts.frequency_hz = std::max(1.0, std::stod(arg.substr(12)));
         } else if (arg.rfind("--ring-size=", 0) == 0) {
             std::string val = arg.substr(12);
             size_t sz = std::stoull(val);
@@ -179,8 +184,9 @@ int main(int argc, char* argv[]) {
     SgOptions opts;
     if (int rc = parse_sg_cli(argc, argv, opts); rc != 0) return rc;
 
-    spdlog::info("Starting: {}ch, {:.0f} SPS, ring={}, block={}",
-                 opts.num_channels, opts.sample_rate, opts.ring_size, opts.block_size);
+    spdlog::info("Starting: {}ch, {:.0f} SPS, {:.2f} Hz, ring={}, block={}",
+                 opts.num_channels, opts.sample_rate, opts.frequency_hz,
+                 opts.ring_size, opts.block_size);
 
     // Init GLFW + OpenGL (optional — headless if window creation fails)
     bool has_window = false;
@@ -234,6 +240,7 @@ int main(int argc, char* argv[]) {
     // Start data generator
     DataGenerator data_gen;
     data_gen.set_drop_counters(drop_ptrs);
+    data_gen.set_frequency(opts.frequency_hz);
     data_gen.start(ring_ptrs, opts.sample_rate, WaveformType::Sine);
 
     // IPC producer (writes to stdout, reads from stdin)
@@ -271,6 +278,7 @@ int main(int argc, char* argv[]) {
         WaveformType::WhiteNoise, WaveformType::Chirp
     };
     std::vector<int> ch_waveform_sel(opts.num_channels, 0);  // per-channel selection
+    double frequency_hz = opts.frequency_hz;
 
     // Main loop
     if (has_window) {
@@ -326,6 +334,28 @@ int main(int argc, char* argv[]) {
                     spdlog::info("Ch {} waveform -> {}", ch + 1,
                                  waveform_labels[ch_waveform_sel[ch]]);
                 }
+            }
+            ImGui::Spacing();
+
+            // --- Periodic waveform frequency ---
+            bool any_periodic = false;
+            for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
+                WaveformType wf = waveform_values[ch_waveform_sel[ch]];
+                if (wf == WaveformType::Sine || wf == WaveformType::Square ||
+                    wf == WaveformType::Sawtooth || wf == WaveformType::Chirp) {
+                    any_periodic = true;
+                    break;
+                }
+            }
+            if (any_periodic) {
+                ImGui::Text("Frequency (Hz)");
+                if (ImGui::InputDouble("##freq_hz", &frequency_hz, 1.0, 100.0, "%.2f")) {
+                    if (frequency_hz < 1.0) frequency_hz = 1.0;
+                    data_gen.set_frequency(frequency_hz);
+                    spdlog::info("Frequency -> {:.2f} Hz", frequency_hz);
+                }
+            } else {
+                ImGui::TextDisabled("Frequency (Hz): N/A (noise)");
             }
             ImGui::Spacing();
 

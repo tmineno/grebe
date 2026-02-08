@@ -10,6 +10,13 @@ class Swapchain;
 class BufferManager;
 class Hud;
 
+struct DrawRegionPx {
+    int32_t  x      = 0;
+    int32_t  y      = 0;
+    uint32_t width  = 0;
+    uint32_t height = 0;
+};
+
 struct WaveformPushConstants {
     float amplitude_scale   = 1.0f;
     float vertical_offset   = 0.0f;
@@ -39,12 +46,13 @@ public:
     // Returns false if swapchain needs recreation
     // Multi-channel: draws N channels with per-channel push constants and firstVertex offsets
     bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
-                    const WaveformPushConstants* channel_pcs, uint32_t num_channels, Hud* hud = nullptr);
+                    const WaveformPushConstants* channel_pcs, uint32_t num_channels,
+                    const DrawRegionPx* draw_region, Hud* hud = nullptr);
 
     // Single-channel convenience overload
     bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
                     const WaveformPushConstants& push_constants, Hud* hud = nullptr) {
-        return draw_frame(ctx, swapchain, buf_mgr, &push_constants, 1, hud);
+        return draw_frame(ctx, swapchain, buf_mgr, &push_constants, 1, nullptr, hud);
     }
 
     void on_swapchain_recreated(VulkanContext& ctx, Swapchain& swapchain);

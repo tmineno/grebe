@@ -39,6 +39,7 @@ public:
     void stop();
 
     void set_sample_rate(double rate);
+    void set_frequency(double hz);                  // periodic waveform base frequency (Hz)
     void set_waveform_type(WaveformType type);           // sets all channels
     void set_channel_waveform(uint32_t ch, WaveformType type);
     WaveformType get_channel_waveform(uint32_t ch) const;
@@ -47,6 +48,7 @@ public:
     bool is_running() const { return running_.load(std::memory_order_relaxed); }
     bool is_paused()  const { return paused_.load(std::memory_order_relaxed); }
     double target_sample_rate() const { return target_sample_rate_.load(std::memory_order_relaxed); }
+    double target_frequency() const { return target_frequency_.load(std::memory_order_relaxed); }
     double actual_sample_rate() const { return actual_rate_.load(std::memory_order_relaxed); }
     uint64_t total_samples_generated() const { return total_samples_.load(std::memory_order_relaxed); }
 
@@ -90,6 +92,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
     std::atomic<double> target_sample_rate_{1'000'000.0};
+    std::atomic<double> target_frequency_{1'000.0};
     std::atomic<WaveformType> waveform_type_{WaveformType::Sine};
     std::array<std::atomic<WaveformType>, MAX_CHANNELS> channel_waveforms_;
     std::atomic<double> actual_rate_{0.0};

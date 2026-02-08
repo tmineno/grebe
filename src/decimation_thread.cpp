@@ -4,6 +4,18 @@
 #include <algorithm>
 #include <chrono>
 
+namespace {
+size_t compute_window_samples(double sample_rate, double time_span_seconds, size_t max_samples) {
+    if (sample_rate <= 0.0 || time_span_seconds <= 0.0 || max_samples == 0) {
+        return 0;
+    }
+    double desired = sample_rate * time_span_seconds;
+    if (desired < 1.0) desired = 1.0;
+    size_t n = static_cast<size_t>(desired);
+    return std::min(n, max_samples);
+}
+} // namespace
+
 DecimationThread::~DecimationThread() {
     stop();
 }
@@ -48,11 +60,13 @@ void DecimationThread::start(std::vector<RingBuffer<int16_t>*> rings, uint32_t t
         for (uint32_t w = 0; w < num_workers_; w++) {
             size_t n = workers_[w].assigned_channels.size();
             workers_[w].drain_bufs.resize(n);
+            workers_[w].history_bufs.resize(n);
             workers_[w].dec_results.resize(n);
             workers_[w].raw_counts.resize(n, 0);
             for (size_t i = 0; i < n; i++) {
                 uint32_t ch = workers_[w].assigned_channels[i];
                 workers_[w].drain_bufs[i].reserve(rings_[ch]->capacity());
+                workers_[w].history_bufs[i].reserve(std::min<size_t>(rings_[ch]->capacity(), 65536));
             }
         }
 
@@ -122,6 +136,10 @@ void DecimationThread::set_sample_rate(double rate) {
     sample_rate_.store(rate, std::memory_order_relaxed);
 }
 
+void DecimationThread::set_visible_time_span(double seconds) {
+    visible_time_span_s_.store(seconds, std::memory_order_relaxed);
+}
+
 void DecimationThread::cycle_mode() {
     auto m = mode_.load(std::memory_order_relaxed);
     DecimationMode next;
@@ -178,8 +196,10 @@ void DecimationThread::thread_func() {
 void DecimationThread::thread_func_single() {
     uint32_t num_ch = static_cast<uint32_t>(rings_.size());
     std::vector<std::vector<int16_t>> drain_bufs(num_ch);
+    std::vector<std::vector<int16_t>> history_bufs(num_ch);
     for (uint32_t ch = 0; ch < num_ch; ch++) {
         drain_bufs[ch].reserve(rings_[ch]->capacity());
+        history_bufs[ch].reserve(std::min<size_t>(rings_[ch]->capacity(), 65536));
     }
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
@@ -197,22 +217,40 @@ void DecimationThread::thread_func_single() {
         uint32_t total_raw = 0;
         double max_fill = 0.0;
         std::vector<uint32_t> per_ch_raw(num_ch, 0);
+        const double sample_rate = sample_rate_.load(std::memory_order_relaxed);
+        const double time_span = visible_time_span_s_.load(std::memory_order_relaxed);
+        size_t total_new = 0;
         for (uint32_t ch = 0; ch < num_ch; ch++) {
             size_t avail = rings_[ch]->size();
+            const size_t window_samples = compute_window_samples(
+                sample_rate, time_span, rings_[ch]->capacity());
+            if (window_samples > 0 && avail > window_samples) {
+                rings_[ch]->discard_bulk(avail - window_samples);
+                avail = window_samples;
+            }
             if (avail > 0) {
                 drain_bufs[ch].resize(avail);
                 size_t popped = rings_[ch]->pop_bulk(drain_bufs[ch].data(), avail);
                 drain_bufs[ch].resize(popped);
-                per_ch_raw[ch] = static_cast<uint32_t>(popped);
+                total_new += popped;
+                auto& hist = history_bufs[ch];
+                hist.insert(hist.end(), drain_bufs[ch].begin(), drain_bufs[ch].end());
+                if (window_samples > 0 && hist.size() > window_samples) {
+                    size_t trim = hist.size() - window_samples;
+                    hist.erase(hist.begin(), hist.begin() + static_cast<std::ptrdiff_t>(trim));
+                }
+                per_ch_raw[ch] = static_cast<uint32_t>(hist.size());
                 total_raw += per_ch_raw[ch];
             } else {
                 drain_bufs[ch].clear();
+                per_ch_raw[ch] = static_cast<uint32_t>(history_bufs[ch].size());
+                total_raw += per_ch_raw[ch];
             }
             double fill = rings_[ch]->fill_ratio();
             if (fill > max_fill) max_fill = fill;
         }
 
-        if (total_raw == 0) continue;
+        if (total_raw == 0 || total_new == 0) continue;
 
         ring_fill_.store(max_fill, std::memory_order_relaxed);
 
@@ -232,11 +270,11 @@ void DecimationThread::thread_func_single() {
         std::vector<int16_t> concatenated;
         uint32_t per_ch_vtx = 0;
         for (uint32_t ch = 0; ch < num_ch; ch++) {
-            if (drain_bufs[ch].empty()) {
+            if (history_bufs[ch].empty()) {
                 concatenated.resize(concatenated.size() + target, 0);
                 per_ch_vtx = target;
             } else {
-                std::vector<int16_t> dec = Decimator::decimate(drain_bufs[ch], mode, target);
+                std::vector<int16_t> dec = Decimator::decimate(history_bufs[ch], mode, target);
                 per_ch_vtx = static_cast<uint32_t>(dec.size());
                 concatenated.insert(concatenated.end(), dec.begin(), dec.end());
             }
@@ -391,9 +429,11 @@ void DecimationThread::worker_func(uint32_t worker_id) {
         // Read current settings
         auto mode_val = mode_.load(std::memory_order_relaxed);
         auto target = target_points_.load(std::memory_order_relaxed);
+        const double sample_rate = sample_rate_.load(std::memory_order_relaxed);
+        const double time_span = visible_time_span_s_.load(std::memory_order_relaxed);
 
         // LTTB high-rate guard
-        if (mode_val == DecimationMode::LTTB && sample_rate_.load(std::memory_order_relaxed) >= 100e6) {
+        if (mode_val == DecimationMode::LTTB && sample_rate >= 100e6) {
             mode_val = DecimationMode::MinMax;
         }
         effective_mode_.store(mode_val, std::memory_order_relaxed);
@@ -405,22 +445,34 @@ void DecimationThread::worker_func(uint32_t worker_id) {
 
             // Drain
             size_t avail = rings_[ch]->size();
+            const size_t window_samples = compute_window_samples(
+                sample_rate, time_span, rings_[ch]->capacity());
+            if (window_samples > 0 && avail > window_samples) {
+                rings_[ch]->discard_bulk(avail - window_samples);
+                avail = window_samples;
+            }
             if (avail > 0) {
                 state.drain_bufs[i].resize(avail);
                 size_t popped = rings_[ch]->pop_bulk(state.drain_bufs[i].data(), avail);
                 state.drain_bufs[i].resize(popped);
-                state.raw_counts[i] = popped;
+                auto& hist = state.history_bufs[i];
+                hist.insert(hist.end(), state.drain_bufs[i].begin(), state.drain_bufs[i].end());
+                if (window_samples > 0 && hist.size() > window_samples) {
+                    size_t trim = hist.size() - window_samples;
+                    hist.erase(hist.begin(), hist.begin() + static_cast<std::ptrdiff_t>(trim));
+                }
+                state.raw_counts[i] = hist.size();
             } else {
                 state.drain_bufs[i].clear();
-                state.raw_counts[i] = 0;
+                state.raw_counts[i] = state.history_bufs[i].size();
             }
 
             double fill = rings_[ch]->fill_ratio();
             if (fill > state.max_fill) state.max_fill = fill;
 
             // Decimate
-            if (!state.drain_bufs[i].empty()) {
-                state.dec_results[i] = Decimator::decimate(state.drain_bufs[i], mode_val, target);
+            if (!state.history_bufs[i].empty()) {
+                state.dec_results[i] = Decimator::decimate(state.history_bufs[i], mode_val, target);
             } else {
                 state.dec_results[i].clear();
             }

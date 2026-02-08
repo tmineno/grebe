@@ -29,6 +29,7 @@ public:
     void set_mode(DecimationMode mode);
     void set_target_points(uint32_t n);
     void set_sample_rate(double rate);
+    void set_visible_time_span(double seconds);
     void cycle_mode(); // None → MinMax → LTTB → None
 
     // Main thread: get latest decimated frame.
@@ -52,6 +53,7 @@ private:
         std::thread thread;
         std::vector<uint32_t> assigned_channels;
         std::vector<std::vector<int16_t>> drain_bufs;    // indexed by assigned channel slot
+        std::vector<std::vector<int16_t>> history_bufs;  // sliding raw window per channel
         std::vector<std::vector<int16_t>> dec_results;   // indexed by assigned channel slot
         std::vector<size_t> raw_counts;                   // indexed by assigned channel slot
         double max_fill = 0.0;
@@ -74,6 +76,7 @@ private:
     std::atomic<DecimationMode> effective_mode_{DecimationMode::None};
     std::atomic<uint32_t> target_points_{3840};
     std::atomic<double> sample_rate_{0.0};
+    std::atomic<double> visible_time_span_s_{0.010}; // default 10 ms
 
     // Double-buffered output
     std::mutex mutex_;

@@ -120,6 +120,10 @@ void DataGenerator::set_sample_rate(double rate) {
     target_sample_rate_.store(rate, std::memory_order_relaxed);
 }
 
+void DataGenerator::set_frequency(double hz) {
+    target_frequency_.store(std::max(1.0, hz), std::memory_order_relaxed);
+}
+
 void DataGenerator::set_waveform_type(WaveformType type) {
     waveform_type_.store(type, std::memory_order_relaxed);
     for (auto& cw : channel_waveforms_) {
@@ -231,8 +235,9 @@ void DataGenerator::thread_func() {
         bool high_rate = (sample_rate >= 100e6);
         size_t batch_size = high_rate ? BATCH_SIZE_HIGH : BATCH_SIZE_LOW;
 
-        // Scale frequency so ~3 cycles are visible per frame at 60 FPS
-        double frequency = std::max(180.0, 3.0 * sample_rate / 1'000'000.0);
+        // Periodic waveform base frequency (fixed Hz unless changed by UI)
+        double frequency = target_frequency_.load(std::memory_order_relaxed);
+        if (frequency < 1.0) frequency = 1.0;
 
         // Read per-channel waveform types
         size_t num_channels = ring_buffers_.size();

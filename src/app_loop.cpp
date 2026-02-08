@@ -16,6 +16,7 @@
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 
@@ -149,6 +150,10 @@ void run_main_loop(AppComponents& app) {
     // Per-frame data buffer (receives decimated output)
     std::vector<int16_t> frame_data;
 
+    // Visible time-span (runtime clamped by sample rate/ring capacity)
+    double visible_time_span_s = 10e-3; // 10 ms default
+    app.dec_thread->set_visible_time_span(visible_time_span_s);
+
     // Title update throttle
     double last_title_update = glfwGetTime();
 
@@ -242,12 +247,30 @@ void run_main_loop(AppComponents& app) {
         // Sequence gaps (IPC mode only)
         uint64_t seq_gaps = app.seq_gaps.load(std::memory_order_relaxed);
 
+        // Dynamic time-span limits derived from runtime system settings.
+        // Lower: at least one sample period and >= 64 samples for stable visualization.
+        // Upper: bounded by per-channel ring capacity.
+        double min_time_span_s = 1e-6;
+        double max_time_span_s = 100e-3;
+        if (data_rate > 0.0) {
+            const double sample_period_s = 1.0 / data_rate;
+            min_time_span_s = std::max(sample_period_s, 64.0 * sample_period_s);
+            if (app.ring_capacity_samples > 0) {
+                max_time_span_s = 0.95 * (static_cast<double>(app.ring_capacity_samples) / data_rate);
+            } else {
+                max_time_span_s = 100e-3;
+            }
+            max_time_span_s = std::max(max_time_span_s, min_time_span_s);
+            visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
+            app.dec_thread->set_visible_time_span(visible_time_span_s);
+        }
+
         // Window coverage: raw_samples / expected_samples_per_frame
         double window_coverage = 0.0;
         {
-            double frame_ms = app.benchmark->frame_time_ms();
-            double expected = (frame_ms > 0.0) ? (data_rate * frame_ms / 1000.0) : 0.0;
+            double expected = data_rate * visible_time_span_s * static_cast<double>(app.num_channels);
             window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
+            window_coverage = std::clamp(window_coverage, 0.0, 1.0);
         }
 
         app.hud->build_status_bar(*app.benchmark, data_rate,
@@ -259,12 +282,39 @@ void run_main_loop(AppComponents& app) {
                                   total_drops,
                                   sg_drops,
                                   seq_gaps,
-                                  window_coverage);
+                                  window_coverage,
+                                  visible_time_span_s,
+                                  min_time_span_s,
+                                  max_time_span_s);
+
+        // Apply time-span adjustments requested by HUD arrow buttons
+        int span_step = app.hud->consume_time_span_step_request();
+        if (span_step != 0) {
+            if (span_step > 0) {
+                visible_time_span_s *= 2.0;
+            } else {
+                visible_time_span_s *= 0.5;
+            }
+            visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
+            app.dec_thread->set_visible_time_span(visible_time_span_s);
+            spdlog::info("Visible time span -> {:.3f} ms (range {:.3f}..{:.3f} ms)",
+                         visible_time_span_s * 1e3,
+                         min_time_span_s * 1e3,
+                         max_time_span_s * 1e3);
+        }
 
         // Render (timed)
         t0 = Benchmark::now();
+        auto hud_region = app.hud->waveform_region();
+        DrawRegionPx draw_region{
+            hud_region.x,
+            hud_region.y,
+            hud_region.width,
+            hud_region.height
+        };
         bool ok = app.renderer->draw_frame(*app.ctx, *app.swapchain, *app.buf_mgr,
-                                           channel_pcs.data(), app.num_channels, app.hud);
+                                           channel_pcs.data(), app.num_channels,
+                                           &draw_region, app.hud);
         app.benchmark->set_render_time(Benchmark::elapsed_ms(t0));
         if (!ok) {
             // Swapchain out of date — recreate

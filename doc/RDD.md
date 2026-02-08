@@ -1,6 +1,6 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.6.0
+**バージョン:** 1.6.1
 **最終更新:** 2026-02-08
 
 ---
@@ -43,6 +43,7 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 **延期・将来マイルストーン:**
 - Shared Memory IPC（TI-08 で延期判定。pipe transport で PoC 要件充足）
 - `--attach-sg` attach モード（既存 `grebe-sg` への接続。現在は spawn + `--embedded` のみ）
+- Main 可視化 UI 改善（波形軸表示 + 可視 time span 設定 — Phase 11e scope）
 - Trigger 機構（internal/external/timer — Phase 15+ scope）
 - E2E レイテンシ定量計測（Phase 12 scope）
 
@@ -318,6 +319,7 @@ struct ConsumerStatusBlockV2 {
 - **FR-02.4:** 間引き率 = (入力サンプル数) / (出力サンプル数) を動的に変更可能にする
 - **FR-02.5:** 間引き処理は描画スレッドとは別スレッドで実行する
 - **FR-02.6:** ≥100 MSPS では LTTB を自動無効化し、MinMax にフォールバックする
+- **FR-02.7:** 可視 time span 設定時は、各チャンネルの最新サンプル列から `sample_rate × time_span` 分の window を優先して描画対象にする（過去データの無制限蓄積表示を防ぐ）
 
 ### FR-03: Vulkan 描画パイプライン
 
@@ -333,6 +335,9 @@ struct ConsumerStatusBlockV2 {
 - **FR-04.1:** GLFW ウィンドウに波形を描画する（デフォルト: 1920×1080）
 - **FR-04.2:** ウィンドウリサイズ対応（スワップチェーン再生成）
 - **FR-04.3:** 画面上にリアルタイムメトリクスを ImGui HUD 表示する（FR-06 参照）
+- **FR-04.4:** 波形表示領域に amplitude 軸を重畳表示する（目盛り・基準線を含む）。振幅ラベルは raw int16（-32768..32767）で表示する
+- **FR-04.5:** 波形表示領域に time 軸を重畳表示する（可視 time span に応じた目盛り・ラベル）
+- **FR-04.6:** Main 可視化ウィンドウ上で可視 time span（表示長）をランタイム変更可能にする（全チャンネル共通、UI は右側 config pane の up/down arrow）。上下限は runtime 設定（sample rate / ring capacity）から導出する
 
 ### FR-05: ベンチマークモード
 
@@ -365,6 +370,7 @@ struct ConsumerStatusBlockV2 {
 | Swap Time | ms | バッファ切替時間 |
 | Render Time | ms | 描画実行時間 |
 | Samples/Frame | count | フレームあたりの入力サンプル数 |
+| Visible Time Span | s / ms / us | Main 可視化ウィンドウで設定された表示長 |
 | Window Coverage | % | capture window 充足率 |
 | Seq Gaps | count | IPC sequence gap 検知数 |
 | Viewer Drops | count | viewer 側リングバッファドロップ累計 |
@@ -407,6 +413,7 @@ struct ConsumerStatusBlockV2 {
 - **FR-09.8:** internal trigger は level/edge（rising/falling/both）を設定可能にする — **Phase 15+ scope**
 - **FR-09.9:** SG 側は trigger をサンプル生成クロックで判定し、capture window 境界を IPC で通知する — **Phase 15+ scope**
 - **FR-09.10:** external trigger 未入力時は periodic timer へフォールバック可能にする — **Phase 15+ scope**
+- **FR-09.11:** SG UI で periodic waveform（Sine/Square/Sawtooth/Chirp）向けの周波数（Hz）を設定可能にする
 
 ### FR-10: トランスポート抽象化と計測
 
@@ -480,6 +487,7 @@ struct ConsumerStatusBlockV2 {
 - periodic timer モードでは window coverage の下限しきい値を定義する
   - Embedded モード: 95% 以上を目標
   - IPC モード: SG-side drops の影響により低下する（TI-09: 4ch×1G で ~63%）。モード別に閾値を設定し、pipe 帯域制約下での許容範囲を明記する
+- time span 設定が有効な場合、window coverage は「1 frame あたり期待サンプル数」ではなく「設定 time span に必要な期待サンプル数」を基準に算出する
 - PoC tier の品質判定は FPS/頂点数 + envelope 一致率 + valid frame ratio + window coverage ratio で行う。Product tier の整合性メトリクス（FR-11.4 product tier）は製品化フェーズで追加する
 
 ### NFR-03: メモリ使用量

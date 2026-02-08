@@ -185,6 +185,32 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 ## 次期マイルストーン候補（優先度順）
 
+### Phase 11e: Main Viewer UI 改善（Waveform Axis + Time Span）
+
+**目標:** Main 可視化ウィンドウで波形の読み取り性を改善し、amplitude/time 軸表示と可視 time span（表示長）設定を追加する。
+**リスク:** 低〜中（描画パイプライン本体は維持し、HUD/decimation 連携を拡張）
+**優先度:** **高** — 本ブランチの主目的。可視化品質を即時改善できる。
+
+- [x] 受入条件を先に固定（Runnable-First / Acceptance-first）
+  - [x] 1) amplitude/time 軸が 1-8ch 表示で破綻なく重畳される
+  - [x] 2) Main ウィンドウの time span 設定変更が再起動なしで即時反映される
+  - [x] 3) 既存モード（embedded / IPC / profile / bench）を壊さずビルド・起動可能
+- [x] Main UI に time span 設定（up/down arrow）を追加
+- [x] Main UI の draw field 右側に config pane を設置し、time span 設定を配置
+- [x] DecimationThread に「最新 window 優先」設定を追加（`sample_rate × time_span` 相当）
+- [x] RingBuffer から古いサンプルを効率的に discard できる API を追加
+- [x] HUD に amplitude 軸（目盛り/基準線、raw int16 ラベル）を追加
+- [x] HUD に time 軸（設定 span に同期した目盛り/ラベル）を追加
+- [x] Window coverage 指標を time span 基準へ整合
+- [x] time span の上限/下限を sample rate / ring capacity から動的導出
+- [x] TI-10 もしくは新規 TI に UI 変更後の挙動差分（FPS/drop 影響有無）を追記
+- [x] SG UI に periodic waveform 周波数（Hz）設定フィールドを追加
+
+**受入条件:**
+- [x] `grebe` 実行中に time span を変更すると、表示波形 window が即座に短縮/延長すること
+- [x] 1ch/4ch/8ch で amplitude/time 軸ラベルが視認可能で、波形と重なっても読めること
+- [x] `cmake --build --preset linux-release` が成功し、`run` でクラッシュなく描画継続できること
+
 ### Phase 12: E2E レイテンシ計測（NFR-02 検証）
 
 **目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。

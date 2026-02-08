@@ -5,6 +5,7 @@
 #include "hud.h"
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -62,7 +63,8 @@ void Renderer::destroy() {
 }
 
 bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
-                          const WaveformPushConstants* channel_pcs, uint32_t num_channels, Hud* hud) {
+                          const WaveformPushConstants* channel_pcs, uint32_t num_channels,
+                          const DrawRegionPx* draw_region, Hud* hud) {
     // Wait for previous frame with this index to finish
     vkWaitForFences(ctx.device(), 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
 
@@ -105,19 +107,34 @@ bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManage
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 
-    // Dynamic viewport and scissor
+    // Dynamic viewport and scissor (optionally clip waveform to draw region)
+    int32_t vp_x = 0;
+    int32_t vp_y = 0;
+    uint32_t vp_w = swapchain.extent().width;
+    uint32_t vp_h = swapchain.extent().height;
+    if (draw_region && draw_region->width > 0 && draw_region->height > 0) {
+        vp_x = std::max(0, draw_region->x);
+        vp_y = std::max(0, draw_region->y);
+        int32_t max_w = static_cast<int32_t>(swapchain.extent().width) - vp_x;
+        int32_t max_h = static_cast<int32_t>(swapchain.extent().height) - vp_y;
+        if (max_w > 0 && max_h > 0) {
+            vp_w = std::min(draw_region->width, static_cast<uint32_t>(max_w));
+            vp_h = std::min(draw_region->height, static_cast<uint32_t>(max_h));
+        }
+    }
+
     VkViewport viewport = {};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(swapchain.extent().width);
-    viewport.height = static_cast<float>(swapchain.extent().height);
+    viewport.x = static_cast<float>(vp_x);
+    viewport.y = static_cast<float>(vp_y);
+    viewport.width = static_cast<float>(vp_w);
+    viewport.height = static_cast<float>(vp_h);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
     VkRect2D scissor = {};
-    scissor.offset = {0, 0};
-    scissor.extent = swapchain.extent();
+    scissor.offset = {vp_x, vp_y};
+    scissor.extent = {vp_w, vp_h};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     // Bind vertex buffer (shared across all channels)

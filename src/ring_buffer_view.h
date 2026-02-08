@@ -85,6 +85,24 @@ public:
         return to_pop;
     }
 
+    // Advance tail without copying payload out.
+    size_t discard_bulk(size_t max_count) {
+        if (max_count == 0) return 0;
+
+        size_t tail = tail_.load(std::memory_order_relaxed);
+        size_t head = head_.load(std::memory_order_acquire);
+
+        size_t avail = (head >= tail)
+            ? (head - tail)
+            : (capacity_ - tail + head);
+
+        size_t to_discard = std::min(max_count, avail);
+        if (to_discard == 0) return 0;
+
+        tail_.store((tail + to_discard) % capacity_, std::memory_order_release);
+        return to_discard;
+    }
+
     size_t size() const {
         size_t head = head_.load(std::memory_order_acquire);
         size_t tail = tail_.load(std::memory_order_acquire);
