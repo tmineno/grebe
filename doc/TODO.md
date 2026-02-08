@@ -201,31 +201,33 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 ### Phase 11d: IPC モード Envelope 検証
 
-**目標:** IPC モードで envelope 検証を有効化し、drop なしレート (≤100 MSPS) で envelope 一致率 100% を達成する。高レート (≥1 GSPS) では SG drops 影響下での定量 baseline を記録する。
-**リスク:** 低〜中（波形生成ロジック共通化 + profiler 拡張）
+**目標:** IPC モードで envelope 検証を有効化し、全レートで envelope 一致率を定量計測する。≤100 MSPS (SG drops = 0) では Embedded 同等の 100% を達成する。
+**リスク:** 低（profiler 内の period buffer 再構築 + verifier 初期化変更のみ。IPC プロトコル変更なし）
 **優先度:** **中** — Phase 11 の残課題。IPC モードの品質証明を完結させる。
 
 **背景:**
-現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。grebe プロセスに period buffer が存在しないことが根本原因。TI-10 のボトルネック分析で 3 層の課題を特定:
-1. Period buffer 未参照（検証自体が不可能）
-2. SG-side drops（≥1 GSPS で ~37% drop、TI-09）
-3. Bucket サイズ不確定性（pipe 帯域・OS スケジューリング依存の変動）
+現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。Phase 11c で EnvelopeVerifier に必要なのは `period_buf` + `period_len` のみであることが確認された。IPC モードでも period buffer を再構築するための入力は全て利用可能:
+
+1. `sample_rate_hz` — FrameHeaderV2 から取得済み
+2. 周波数 — `max(180.0, 3.0 * sample_rate / 1e6)` で算出（DataGenerator と同一式）
+3. 波形タイプ — `--profile` モードのデフォルトは全チャンネル Sine
+4. Per-channel phase offset — `π × ch / num_channels`
+
+SG drops (≥1 GSPS) は受信データの位相不連続を生じるが、周期波形では各バケットの (min, max) ペアが周期内のいずれかのウィンドウ位置に対応するため、envelope 妥当性への影響は限定的と予測される（定量検証で確認）。
 
 **アプローチ:**
-- SignalConfigV2 の waveform type + sample_rate_hz から period buffer を grebe 側で再構築
-- 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
+- 周波数計算 + period buffer 生成ロジックを DataGenerator から抽出し `grebe_common` 共通ユーティリティ化
+- Profiler: IPC モード時に `FrameHeaderV2.sample_rate_hz` + Sine 前提で period buffer を自力構築し EnvelopeVerifier を初期化
 - Phase 11c の lazy-caching verifier をそのまま流用
-- 高レートでは SG drops 考慮の許容 match rate 閾値を設定
 
-- [ ] 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
-- [ ] IPC モード profiler で SignalConfigV2 から period buffer を再構築
+- [ ] 周波数計算 + period buffer 生成を `grebe_common` に共通ユーティリティとして抽出
+- [ ] Profiler: IPC モード時に sample_rate_hz + Sine 前提で EnvelopeVerifier を初期化
 - [ ] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
-- [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録
-- [ ] SG drops 影響下での許容 match rate 閾値定義
+- [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録（SG drops 影響評価）
 - [ ] TI-10 Phase 11d セクション追記
 
 **受入条件:**
-- IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%（SG drops = 0 のため Embedded と同等を期待）
+- IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%（SG drops = 0 のため Embedded と同等）
 - IPC 1ch/4ch × 1 GSPS: envelope 定量計測値が JSON に記録され、TI-10 に分析が含まれる
 - `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される（-1.0 ではない）
 
