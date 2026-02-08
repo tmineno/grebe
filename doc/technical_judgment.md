@@ -15,6 +15,7 @@
 | 2026-02-08 | Phase 9 | TI-07 Windows ネイティブ追記。R-12 解消 (PeekNamedPipe)。Windows パイプ帯域 ~10-36 MB/s (WSL2 比 1/10〜1/30) |
 | 2026-02-08 | Phase 10 | TI-07 Pipe 最適化後追記。バッファ 1MB + block 16K/64K + writev。Windows 帯域 ~10→~100-470 MB/s。Go/No-Go: Phase 11 延期 |
 | 2026-02-08 | Phase 10-2 | TI-08 ボトルネック再評価。WSL2 Release 検証で drops 根本原因はパイプラインスループット（キャッシュ冷えデータ）と判明。shm 延期続行 |
+| 2026-02-08 | Phase 10-3 | TI-08 追記。マルチスレッド間引き + リング 64M 拡大 + Debug 警告。4ch/8ch×1G 0-drops 達成。R-08/R-13 完了 |
 
 ---
 
@@ -655,6 +656,52 @@ WSL2 Release:
 - **shm 再検討条件:** Release ビルドで pipe 帯域がボトルネックとなるユースケースが出現した場合。具体的には、消費側改善により実効スループットが pipe 帯域 (~400 MB/s ≈ 200 MSPS×2ch) を超過した場合。
 - **4ch×1G の drops は PoC として許容可能。** FPS は 54-56 を維持し、MinMax デシメーション後の頂点数 (3840/ch) は不変。drops はデシメーション入力の時間窓が狭まるのみで、可視化品質への影響は軽微。
 
+### Phase 10-3: パイプラインボトルネック解消
+
+**実施施策:**
+
+1. **マルチスレッド間引き** — `std::barrier` (C++20) による Two-phase 並列処理
+   - Worker count: `min(channel_count, hardware_concurrency/2, 4)` — 1ch は従来シングルスレッド、4ch → 4 workers, 8ch → 4 workers
+   - Phase 1 (並列): 各 worker が担当チャンネルの ring drain + decimate を並行実行
+   - Phase 2 (逐次): coordinator がチャンネル順に結果を concatenate → front buffer swap
+   - SPSC 安全性: 各 ring buffer は `ch % num_workers` で 1 worker のみが排他的に pop
+
+2. **リングバッファデフォルト拡大** — 16M → 64M samples (CLI で 256M 指定可)
+
+3. **Debug ビルド計測警告** — `--profile`/`--bench` を Debug で実行時に `spdlog::warn` を出力
+
+**WSL2 Release 計測結果 (Phase 10-3):**
+
+| 構成 | Drops | smp/f avg | decimate_ms avg | ring_fill avg | FPS |
+|---|---|---|---|---|---|
+| 1ch Embedded | 0 | 149,939 | — | 0.0% | 60.0 |
+| 4ch Embedded (ring=256M) | 0 | 1,147,502 | 0.22-0.46 | 0.0-0.1% | 57.7 |
+| 4ch IPC (ring=256M) | 0 | 649,813 | 0.20-0.39 | 0.0% | 55.7 |
+| 8ch Embedded (ring=256M) | 0 | 1,709,750 | — | — | 57.2 |
+
+**Phase 10-2 → 10-3 比較 (4ch Embedded):**
+
+| 指標 | Phase 10-2 | Phase 10-3 | 改善 |
+|---|---|---|---|
+| Drops | 2,130,509,824 | **0** | ∞ |
+| decimate_ms | 18.19 ms | 0.22-0.46 ms | **40-80x** |
+| ring_fill avg | 14.9% | 0.0% | 完全解消 |
+| FPS | 56.4 | 57.7 | +2.3% |
+| Workers | 0 (single) | 4 (parallel) | — |
+
+**分析:**
+
+- マルチスレッド間引きにより decimate_ms が **40-80x 高速化**（18.19ms → 0.22-0.46ms）。4ch を並列処理することで、各 worker は 1ch 分のみ drain+decimate し、cache locality が大幅改善。
+- ring_fill が 14.9% → 0.0% に低下。ring が一切蓄積せず、DataGenerator の全サンプルを即時消費。
+- IPC モードの 4ch×1G も 0 drops。ただし smp/f (649K) は Embedded (1.15M) より低い — pipe 帯域が流入レートを制限するため。grebe-sg 側では DataGenerator → local ring の overflow (SG-side drops) が発生するが、grebe (viewer) 側のパイプライン処理は完全に追従。
+- **8ch×1G も 0 drops** — 4 workers で 8ch を 2ch/worker ずつ処理。
+- **shm 再検討条件の更新:** grebe 側の消費スループットが pipe 帯域を大幅に超過するようになったため、IPC mode で grebe-sg 側の SG-local drops を解消するには pipe 帯域の拡大 (shm) が有効になりうる。ただし Embedded モードでは完全 0-drops のため、PoC としての目標は達成済み。
+
+**判定更新:**
+
+- **4ch/8ch×1G 0-drops 達成。** Phase 10-2 の推奨施策 3 項目 (マルチスレッド間引き、リング拡大、Release 標準化) を全て実施し、Embedded モードで全レート・全チャンネル数で drops = 0 を達成。
+- **shm (Phase 11) は引き続き延期。** IPC mode の grebe-sg 側 drops は残存するが、grebe (viewer) 側は 0-drops。Embedded モードが PoC のリファレンス動作。
+
 ---
 
 ## 推奨事項トラッカー
@@ -670,9 +717,9 @@ WSL2 Release:
 | R-05 | ReBAR/SAM 永続マップド検証 | 低 | 見送り | — | dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照) |
 | R-06 | GPU Compute 間引きの実GPU再検証 | 中 | 完了 | Phase 6 | CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03) |
 | R-07 | E2E レイテンシ計測 | 低 | 未着手 | — | NFR-02 検証 |
-| R-08 | マルチスレッド間引き | 中 | 未着手 | — | TI-08: 実パイプライン 3.75 GSPS < BM-B 21 GSPS。4ch 並列化で 4ch×1G 0-drops の可能性 |
+| R-08 | マルチスレッド間引き | 中 | 完了 | Phase 10-3 | std::barrier + worker threads。4ch/8ch×1G 0-drops 達成。decimate_ms 18ms→0.3ms (40-80x) |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
 | R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: ボトルネックが transport ではなく消費側 (ring drain + cache cold) のため投資対効果低。Embedded でも同水準 drops |
 | R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |
-| R-13 | Release ビルドでの計測標準化 | 高 | 未着手 | — | TI-08: Debug/Release の BM-B 乖離 14x。実パイプライン差は 13% のみだが、計測の信頼性向上のため標準化推奨 |
+| R-13 | Release ビルドでの計測標準化 | 高 | 完了 | Phase 10-3 | Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト |

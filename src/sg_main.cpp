@@ -27,7 +27,7 @@
 struct SgOptions {
     uint32_t num_channels = 1;
     double   sample_rate  = 1'000'000.0;
-    size_t   ring_size    = 16'777'216;  // 16M samples
+    size_t   ring_size    = 67'108'864;  // 64M samples
     uint32_t block_size   = 16384;       // IPC block size (samples/channel/frame)
 };
 

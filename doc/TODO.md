@@ -105,6 +105,13 @@
 - [x] **pipe/buffer 側改善の投資対効果評価**: マルチスレッド間引き (中), リングサイズ拡大 (低リスク), adaptive block (中)
 - [x] **判定**: TI-08 に記録。shm 延期続行。実パイプライン 3.75 GSPS vs BM-B 21 GSPS の乖離解消が本質
 
+### Phase 10-3: パイプラインボトルネック解消
+
+- [x] リングバッファデフォルト拡大 (16M → 64M)
+- [x] Debug ビルド計測警告 (`--profile`/`--bench` で `spdlog::warn`)
+- [x] マルチスレッド間引き (`std::barrier` + worker threads, 4ch→4 workers, 8ch→4 workers)
+- [x] 受入条件: 4ch/8ch × 1 GSPS Embedded で 0 drops 達成
+
 ---
 
 ## 次期マイルストーン（実装予定）

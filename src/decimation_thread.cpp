@@ -1,6 +1,7 @@
 #include "decimation_thread.h"
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 
 DecimationThread::~DecimationThread() {
@@ -21,19 +22,83 @@ void DecimationThread::start(std::vector<RingBuffer<int16_t>*> rings, uint32_t t
     stop_requested_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_relaxed);
 
+    uint32_t num_ch = static_cast<uint32_t>(rings_.size());
+
+    // Determine worker count: 1ch → single-thread, multi-ch → workers
+    if (num_ch <= 1) {
+        num_workers_ = 0;
+    } else {
+        uint32_t hw = std::max(1u, std::thread::hardware_concurrency() / 2);
+        num_workers_ = std::min({num_ch, hw, 4u});
+    }
+
+    // Setup workers if multi-threaded
+    if (num_workers_ > 0) {
+        workers_.resize(num_workers_);
+
+        // Assign channels round-robin: ch % num_workers
+        for (uint32_t w = 0; w < num_workers_; w++) {
+            workers_[w].assigned_channels.clear();
+        }
+        for (uint32_t ch = 0; ch < num_ch; ch++) {
+            workers_[ch % num_workers_].assigned_channels.push_back(ch);
+        }
+
+        // Pre-allocate per-worker buffers
+        for (uint32_t w = 0; w < num_workers_; w++) {
+            size_t n = workers_[w].assigned_channels.size();
+            workers_[w].drain_bufs.resize(n);
+            workers_[w].dec_results.resize(n);
+            workers_[w].raw_counts.resize(n, 0);
+            for (size_t i = 0; i < n; i++) {
+                uint32_t ch = workers_[w].assigned_channels[i];
+                workers_[w].drain_bufs[i].reserve(rings_[ch]->capacity());
+            }
+        }
+
+        // Create barriers: num_workers + 1 (coordinator)
+        start_barrier_ = std::make_unique<std::barrier<>>(num_workers_ + 1);
+        done_barrier_ = std::make_unique<std::barrier<>>(num_workers_ + 1);
+
+        // Launch worker threads
+        for (uint32_t w = 0; w < num_workers_; w++) {
+            workers_[w].thread = std::thread(&DecimationThread::worker_func, this, w);
+        }
+    }
+
     thread_ = std::thread(&DecimationThread::thread_func, this);
 
-    spdlog::info("DecimationThread started (channels={}, target={}, mode={})",
-                 rings_.size(), target_points, mode_name(mode));
+    spdlog::info("DecimationThread started (channels={}, target={}, mode={}, workers={})",
+                 rings_.size(), target_points, mode_name(mode), num_workers_);
 }
 
 void DecimationThread::stop() {
     if (!running_.load()) return;
 
     stop_requested_.store(true, std::memory_order_relaxed);
+
+    // Unblock workers waiting on start_barrier
+    if (num_workers_ > 0 && start_barrier_) {
+        // Coordinator needs to arrive at start_barrier to release workers
+        // so they can observe stop_requested_ and exit.
+        // The coordinator thread will do this when it exits its loop.
+    }
+
     if (thread_.joinable()) {
         thread_.join();
     }
+
+    // Workers should have exited by now (coordinator released them before exiting)
+    for (auto& w : workers_) {
+        if (w.thread.joinable()) {
+            w.thread.join();
+        }
+    }
+
+    workers_.clear();
+    start_barrier_.reset();
+    done_barrier_.reset();
+    num_workers_ = 0;
     running_.store(false, std::memory_order_relaxed);
     spdlog::info("DecimationThread stopped");
 }
@@ -83,6 +148,15 @@ const char* DecimationThread::mode_name(DecimationMode m) {
 }
 
 void DecimationThread::thread_func() {
+    if (num_workers_ == 0) {
+        thread_func_single();
+    } else {
+        thread_func_multi();
+    }
+}
+
+// Single-channel optimized path (no worker threads) — same as original implementation
+void DecimationThread::thread_func_single() {
     uint32_t num_ch = static_cast<uint32_t>(rings_.size());
     std::vector<std::vector<int16_t>> drain_bufs(num_ch);
     for (uint32_t ch = 0; ch < num_ch; ch++) {
@@ -138,7 +212,6 @@ void DecimationThread::thread_func() {
         uint32_t per_ch_vtx = 0;
         for (uint32_t ch = 0; ch < num_ch; ch++) {
             if (drain_bufs[ch].empty()) {
-                // No data for this channel, output zeros for target points
                 concatenated.resize(concatenated.size() + target, 0);
                 per_ch_vtx = target;
             } else {
@@ -165,5 +238,146 @@ void DecimationThread::thread_func() {
             front_raw_count_ = total_raw;
             new_data_ = true;
         }
+    }
+}
+
+// Multi-channel path with worker threads
+void DecimationThread::thread_func_multi() {
+    uint32_t num_ch = static_cast<uint32_t>(rings_.size());
+
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
+        // Check if any channel has data
+        size_t total_avail = 0;
+        for (uint32_t ch = 0; ch < num_ch; ch++) {
+            total_avail += rings_[ch]->size();
+        }
+        if (total_avail == 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            continue;
+        }
+
+        auto t0 = std::chrono::steady_clock::now();
+
+        // Signal workers to start drain+decimate
+        start_barrier_->arrive_and_wait();
+
+        // Wait for all workers to complete
+        done_barrier_->arrive_and_wait();
+
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        // Gather results: concatenate in channel order [ch0 | ch1 | ... | chN-1]
+        std::vector<int16_t> concatenated;
+        uint32_t total_raw = 0;
+        double max_fill = 0.0;
+        uint32_t per_ch_vtx = 0;
+        auto target = target_points_.load(std::memory_order_relaxed);
+
+        for (uint32_t ch = 0; ch < num_ch; ch++) {
+            // Find which worker owns this channel
+            uint32_t w = ch % num_workers_;
+            // Find the slot index within that worker
+            auto& assigned = workers_[w].assigned_channels;
+            size_t slot = 0;
+            for (size_t i = 0; i < assigned.size(); i++) {
+                if (assigned[i] == ch) { slot = i; break; }
+            }
+
+            total_raw += static_cast<uint32_t>(workers_[w].raw_counts[slot]);
+
+            auto& dec = workers_[w].dec_results[slot];
+            if (dec.empty()) {
+                concatenated.resize(concatenated.size() + target, 0);
+                per_ch_vtx = target;
+            } else {
+                per_ch_vtx = static_cast<uint32_t>(dec.size());
+                concatenated.insert(concatenated.end(), dec.begin(), dec.end());
+            }
+
+            if (workers_[w].max_fill > max_fill) {
+                max_fill = workers_[w].max_fill;
+            }
+        }
+
+        ring_fill_.store(max_fill, std::memory_order_relaxed);
+        decimate_time_ms_.store(ms, std::memory_order_relaxed);
+        per_ch_vtx_.store(per_ch_vtx, std::memory_order_relaxed);
+
+        double ratio = (concatenated.empty()) ? 1.0
+            : static_cast<double>(total_raw) / static_cast<double>(concatenated.size());
+        decimate_ratio_.store(ratio, std::memory_order_relaxed);
+
+        // Swap to front buffer
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            front_buffer_.swap(concatenated);
+            front_raw_count_ = total_raw;
+            new_data_ = true;
+        }
+    }
+
+    // Release workers so they can exit
+    // Workers are waiting on start_barrier — arrive once more so they unblock and see stop_requested_
+    start_barrier_->arrive_and_wait();
+    // Workers will arrive at done_barrier before exiting
+    done_barrier_->arrive_and_wait();
+}
+
+void DecimationThread::worker_func(uint32_t worker_id) {
+    auto& state = workers_[worker_id];
+    auto mode_val = mode_.load(std::memory_order_relaxed);
+    auto target = target_points_.load(std::memory_order_relaxed);
+
+    while (true) {
+        // Wait for coordinator to signal start
+        start_barrier_->arrive_and_wait();
+
+        if (stop_requested_.load(std::memory_order_relaxed)) {
+            // Signal done before exiting so coordinator doesn't hang
+            done_barrier_->arrive_and_wait();
+            break;
+        }
+
+        // Read current settings
+        mode_val = mode_.load(std::memory_order_relaxed);
+        target = target_points_.load(std::memory_order_relaxed);
+
+        // LTTB high-rate guard
+        if (mode_val == DecimationMode::LTTB && sample_rate_.load(std::memory_order_relaxed) >= 100e6) {
+            mode_val = DecimationMode::MinMax;
+        }
+        effective_mode_.store(mode_val, std::memory_order_relaxed);
+
+        // Drain and decimate assigned channels
+        state.max_fill = 0.0;
+        for (size_t i = 0; i < state.assigned_channels.size(); i++) {
+            uint32_t ch = state.assigned_channels[i];
+
+            // Drain
+            size_t avail = rings_[ch]->size();
+            if (avail > 0) {
+                state.drain_bufs[i].resize(avail);
+                size_t popped = rings_[ch]->pop_bulk(state.drain_bufs[i].data(), avail);
+                state.drain_bufs[i].resize(popped);
+                state.raw_counts[i] = popped;
+            } else {
+                state.drain_bufs[i].clear();
+                state.raw_counts[i] = 0;
+            }
+
+            double fill = rings_[ch]->fill_ratio();
+            if (fill > state.max_fill) state.max_fill = fill;
+
+            // Decimate
+            if (!state.drain_bufs[i].empty()) {
+                state.dec_results[i] = Decimator::decimate(state.drain_bufs[i], mode_val, target);
+            } else {
+                state.dec_results[i].clear();
+            }
+        }
+
+        // Signal completion
+        done_barrier_->arrive_and_wait();
     }
 }

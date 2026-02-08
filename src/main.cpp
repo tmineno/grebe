@@ -84,6 +84,12 @@ int main(int argc, char* argv[]) {
         CliOptions opts;
         if (int rc = parse_cli(argc, argv, opts); rc != 0) return rc;
 
+#ifndef NDEBUG
+        if (opts.enable_profile || opts.enable_bench) {
+            spdlog::warn("Running --profile/--bench in Debug build — results are not representative. Use Release.");
+        }
+#endif
+
         // Init GLFW
         if (!glfwInit()) {
             throw std::runtime_error("Failed to initialize GLFW");
@@ -188,7 +194,7 @@ int main(int argc, char* argv[]) {
             std::vector<std::string> sg_args;
             sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
             sg_args.push_back("--block-size=" + std::to_string(opts.block_size));
-            if (opts.ring_size != 16'777'216) {
+            if (opts.ring_size != 67'108'864) {
                 sg_args.push_back("--ring-size=" + std::to_string(opts.ring_size));
             }
 
