@@ -15,6 +15,8 @@
 | 2026-02-08 | Phase 9 | TI-07 Windows ネイティブ追記。R-12 解消 (PeekNamedPipe)。Windows パイプ帯域 ~10-36 MB/s (WSL2 比 1/10〜1/30) |
 | 2026-02-08 | Phase 10 | TI-07 Pipe 最適化後追記。バッファ 1MB + block 16K/64K + writev。Windows 帯域 ~10→~100-470 MB/s。Go/No-Go: Phase 11 延期 |
 | 2026-02-08 | Phase 10-2 | TI-08 ボトルネック再評価。WSL2 Release 検証で drops 根本原因はパイプラインスループット（キャッシュ冷えデータ）と判明。shm 延期続行 |
+| 2026-02-08 | Phase 10-3 | TI-08 追記。マルチスレッド間引き + リング 64M 拡大 + Debug 警告。4ch/8ch×1G 0-drops 達成。R-08/R-13 完了 |
+| 2026-02-08 | Phase 10-4 | TI-09 SG-side drop 評価。IPC vs Embedded 定量比較。SG drops テレメトリ追加 (FrameHeaderV2 + profiler)。R-14 追加 |
 
 ---
 
@@ -30,6 +32,7 @@
 | TI-06 | スレッドモデル | 回答済み | 2026-02-07 |
 | TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
 | TI-08 | IPC ボトルネック再評価と次ステップ判定 | 回答済み | 2026-02-08 |
+| TI-09 | SG-side drop 評価と緩和策 | 回答済み | 2026-02-08 |
 
 ---
 
@@ -655,6 +658,140 @@ WSL2 Release:
 - **shm 再検討条件:** Release ビルドで pipe 帯域がボトルネックとなるユースケースが出現した場合。具体的には、消費側改善により実効スループットが pipe 帯域 (~400 MB/s ≈ 200 MSPS×2ch) を超過した場合。
 - **4ch×1G の drops は PoC として許容可能。** FPS は 54-56 を維持し、MinMax デシメーション後の頂点数 (3840/ch) は不変。drops はデシメーション入力の時間窓が狭まるのみで、可視化品質への影響は軽微。
 
+### Phase 10-3: パイプラインボトルネック解消
+
+**実施施策:**
+
+1. **マルチスレッド間引き** — `std::barrier` (C++20) による Two-phase 並列処理
+   - Worker count: `min(channel_count, hardware_concurrency/2, 4)` — 1ch は従来シングルスレッド、4ch → 4 workers, 8ch → 4 workers
+   - Phase 1 (並列): 各 worker が担当チャンネルの ring drain + decimate を並行実行
+   - Phase 2 (逐次): coordinator がチャンネル順に結果を concatenate → front buffer swap
+   - SPSC 安全性: 各 ring buffer は `ch % num_workers` で 1 worker のみが排他的に pop
+
+2. **リングバッファデフォルト拡大** — 16M → 64M samples (CLI で 256M 指定可)
+
+3. **Debug ビルド計測警告** — `--profile`/`--bench` を Debug で実行時に `spdlog::warn` を出力
+
+**WSL2 Release 計測結果 (Phase 10-3):**
+
+| 構成 | Drops | smp/f avg | decimate_ms avg | ring_fill avg | FPS |
+|---|---|---|---|---|---|
+| 1ch Embedded | 0 | 149,939 | — | 0.0% | 60.0 |
+| 4ch Embedded (ring=256M) | 0 | 1,147,502 | 0.22-0.46 | 0.0-0.1% | 57.7 |
+| 4ch IPC (ring=256M) | 0 | 649,813 | 0.20-0.39 | 0.0% | 55.7 |
+| 8ch Embedded (ring=256M) | 0 | 1,709,750 | — | — | 57.2 |
+
+**Phase 10-2 → 10-3 比較 (4ch Embedded):**
+
+| 指標 | Phase 10-2 | Phase 10-3 | 改善 |
+|---|---|---|---|
+| Drops | 2,130,509,824 | **0** | ∞ |
+| decimate_ms | 18.19 ms | 0.22-0.46 ms | **40-80x** |
+| ring_fill avg | 14.9% | 0.0% | 完全解消 |
+| FPS | 56.4 | 57.7 | +2.3% |
+| Workers | 0 (single) | 4 (parallel) | — |
+
+**分析:**
+
+- マルチスレッド間引きにより decimate_ms が **40-80x 高速化**（18.19ms → 0.22-0.46ms）。4ch を並列処理することで、各 worker は 1ch 分のみ drain+decimate し、cache locality が大幅改善。
+- ring_fill が 14.9% → 0.0% に低下。ring が一切蓄積せず、DataGenerator の全サンプルを即時消費。
+- IPC モードの 4ch×1G も 0 drops。ただし smp/f (649K) は Embedded (1.15M) より低い — pipe 帯域が流入レートを制限するため。grebe-sg 側では DataGenerator → local ring の overflow (SG-side drops) が発生するが、grebe (viewer) 側のパイプライン処理は完全に追従。
+- **8ch×1G も 0 drops** — 4 workers で 8ch を 2ch/worker ずつ処理。
+- **shm 再検討条件の更新:** grebe 側の消費スループットが pipe 帯域を大幅に超過するようになったため、IPC mode で grebe-sg 側の SG-local drops を解消するには pipe 帯域の拡大 (shm) が有効になりうる。ただし Embedded モードでは完全 0-drops のため、PoC としての目標は達成済み。
+
+**判定更新:**
+
+- **4ch/8ch×1G 0-drops 達成。** Phase 10-2 の推奨施策 3 項目 (マルチスレッド間引き、リング拡大、Release 標準化) を全て実施し、Embedded モードで全レート・全チャンネル数で drops = 0 を達成。
+- **shm (Phase 11) は引き続き延期。** IPC mode の grebe-sg 側 drops は残存するが、grebe (viewer) 側は 0-drops。Embedded モードが PoC のリファレンス動作。
+
+---
+
+## TI-09: SG-side drop 評価と緩和策
+
+> Phase 10-3 で grebe (viewer) 側の 0-drops を達成した後、IPC モードにおける grebe-sg 側の drop を定量評価し、可視化品質への影響と緩和策を分析する。
+
+### 2026-02-08 Phase 10-4 (WSL2, GCC Release, Ryzen 9 9950X3D)
+
+**背景**
+
+Phase 10-3 でマルチスレッド間引きにより grebe 側の 4ch/8ch×1G 0-drops を達成。しかし IPC モードでは **grebe-sg (Signal Generator) 側** で大量の drops が発生していることが確認された。
+
+**SG-side drop メカニズム:**
+
+1. DataGenerator が 4 GSPS (4ch × 1G) のサンプルを生成 → ring buffer に `push_bulk()`
+2. Sender thread が ring から drain → `writev()` で pipe 送信 (**ブロッキング**)
+3. Pipe 帯域 (~410 MB/s) << 要求帯域 (8 GB/s @ 4ch×1G) → `writev()` が長時間ブロック
+4. Sender thread 停止中に ring が蓄積 → DataGenerator の `push_bulk()` が partial write → **drop 発生**
+5. `data_generator.cpp` で ≥100 MSPS 時のバックプレッシャ sleep が無効化されており、生成レートは pipe 帯域に関係なく最大速度を維持
+
+**帯域ギャップ:**
+
+| 構成 | 要求帯域 | Pipe 帯域 | ギャップ |
+|---|---|---|---|
+| 1ch × 1G | 2 GB/s | ~410 MB/s | 4.9x |
+| 4ch × 1G | 8 GB/s | ~410 MB/s | ~20x |
+| 8ch × 1G | 16 GB/s | ~410 MB/s | ~39x |
+
+**テレメトリ基盤拡張**
+
+SG drops を定量計測するため、以下の変更を実施:
+
+- `FrameHeaderV2` に `uint64_t sg_drops_total` フィールド追加
+- grebe-sg sender thread が DropCounter 合計を毎フレーム header に設定
+- grebe 側 ipc_receiver で `AppComponents::sg_drops_total` に伝搬
+- `--profile` JSON レポートに `sg_drop_total` フィールド追加
+- HUD に SG drops 表示 (viewer drops との区別表記)
+
+**計測結果: IPC vs Embedded (ring=256M, V-Sync ON)**
+
+| 構成 | FPS avg | Viewer Drops | SG Drops | smp/f avg | Vtx/ch |
+|---|---|---|---|---|---|
+| Embedded 1ch×1G | 60.0 | 0 | 0 | 149,939 | 3,840 |
+| Embedded 4ch×1G | 58.7 | 0 | 0 | 885,511 | 3,840 |
+| IPC 1ch×1G | 58.3 | 0 | 0 | — | 3,840 |
+| IPC 4ch×1G | 55.7 | 0 | 7,890,305,024 | 644,549 | 3,840 |
+| IPC 8ch×1G | 55.5 | 0 | 34,251,079,680 | — | 3,840 |
+
+注: 100 MSPS 以下の全レートでは IPC/Embedded ともに viewer drops = 0, SG drops = 0。
+
+**SG drop 率の推定**
+
+| 構成 | 生成レート | 計測時間 (~300f) | 総生成量 (推定) | SG Drops | Drop 率 |
+|---|---|---|---|---|---|
+| IPC 1ch×1G | 1 GSPS | ~5.1s | ~5.1G | 0 | 0% |
+| IPC 4ch×1G | 4 GSPS | ~5.4s | ~21.6G | 7.9G | ~37% |
+| IPC 8ch×1G | 8 GSPS | ~5.4s | ~43.2G | 34.3G | ~79% |
+
+**可視化品質への影響分析**
+
+1. **MinMax 出力は不変**: viewer 側のデシメーション後の頂点数は全モードで 3,840/ch。SG drops の有無に関係なく、表示される波形の解像度は同一。
+
+2. **smp/f の差**: IPC 4ch×1G では smp/f=644K vs Embedded 885K (0.73x)。これは pipe 帯域制限により viewer に到達するサンプル数が減少するため。ただし MinMax は到着サンプル全体の min/max を抽出するため、デシメーション品質は入力サンプル数に対して鈍感。
+
+3. **時間窓のサブサンプリング**: SG drops により、表示される時間窓が理論値の ~63% (4ch) に短縮される。波形の大局的な形状は維持されるが、高周波成分の一部が失われる可能性がある。
+
+4. **FPS への影響**: IPC 4ch×1G の FPS (55.7) は Embedded (58.7) と比較して 5% 低下。pipe 読み出しのオーバーヘッドによるもので、SG drops とは無関係。
+
+**結論: 現行の PoC 計測メトリクス (頂点数、FPS、smp/f) において、SG drops による有意な可視化品質劣化は観測されていない。** MinMax デシメーション後の出力は SG drops の有無に関わらず 3,840 vtx/ch で同一であり、これは品質維持の必要条件を満たす。ただし、頂点数の不変は十分条件ではなく、波形忠実度の厳密な検証 (Embedded 基準との envelope 比較、ピーク見逃し率等) は製品化フェーズの課題として残る。
+
+**緩和策マトリクス**
+
+| 施策 | コスト | リスク | 効果 | PoC 適合性 |
+|---|---|---|---|---|
+| A. DataGenerator バックプレッシャ復活 (≥100 MSPS) | 低 | 低 | SG drops 減少、actual_rate も低下 | 良 |
+| B. SG-side pre-decimation (pipe 前に間引き) | 高 | 中 | pipe 帯域要求 ~1000x 削減 | 不適 (設計変更大) |
+| C. Adaptive rate limiting (pipe 帯域に合わせた生成レート自動調整) | 中 | 低 | SG drops 解消 | 良 |
+| D. Non-blocking pipe + 明示的 frame drop | 中 | 中 | drop 制御改善 | 中 |
+| E. Credit-based flow control | 中 | 中 | 適切なフロー制御 | 不適 (Phase 11 scope) |
+| F. Shared Memory IPC (Phase 11) | 高 | 高 | pipe 帯域制約排除 | 延期済み |
+
+**判定**
+
+- **SG-side drops は PoC として許容。** Embedded モードが 0-drops のリファレンス動作であり、IPC モードの SG drops は transport 帯域限界に起因する設計上の想定内挙動。
+- **施策 A (バックプレッシャ復活) が最小コストの改善策。** ただし actual_rate が pipe 帯域に律速されるため、1 GSPS の「生成能力の実証」としては矛盾する。PoC の目的 (1 GSPS 表示能力の実証) は Embedded モードで達成済みのため、IPC モードの SG drops 緩和は製品化フェーズでの検討事項。
+- **施策 B (SG-side pre-decimation) が最も根本的な解決策** — pipe に生データではなく間引き済みデータを流す構成。ただし grebe-sg と grebe の間引きパラメータ同期、画面サイズ変更時の再ネゴシエーション等、設計の複雑性が大幅に増加するため PoC scope 外。
+- **将来の製品化では施策 B + F (SG-side pre-decimation + shm) の組み合わせ** が最適解。shm で帯域制約を排除しつつ、pre-decimation で必要帯域を削減。
+
 ---
 
 ## 推奨事項トラッカー
@@ -663,16 +800,17 @@ WSL2 Release:
 
 | # | 推奨事項 | 優先度 | ステータス | 対応Phase | 備考 |
 |---|---|---|---|---|---|
-| R-01 | 実 GPU 環境での再計測 | 高 | 完了 | Phase 6-7 | dzn (Phase 6) + ネイティブ Vulkan (Phase 7) で全ベンチマーク計測済み |
-| R-02 | マルチチャンネル対応 (4ch/8ch) | 高 | 完了 | Phase 5 | FR-07 実装済み (fb21264, 387c6fd) |
-| R-03 | LTTB の高レート無効化 | 高 | 完了 | Phase 5 | FR-02.6 実装済み (effective_mode_ パターン) |
+| ~~R-01~~ | ~~実 GPU 環境での再計測~~ | ~~高~~ | ~~完了~~ | ~~Phase 6-7~~ | ~~dzn (Phase 6) + ネイティブ Vulkan (Phase 7) で全ベンチマーク計測済み~~ |
+| ~~R-02~~ | ~~マルチチャンネル対応 (4ch/8ch)~~ | ~~高~~ | ~~完了~~ | ~~Phase 5~~ | ~~FR-07 実装済み (fb21264, 387c6fd)~~ |
+| ~~R-03~~ | ~~LTTB の高レート無効化~~ | ~~高~~ | ~~完了~~ | ~~Phase 5~~ | ~~FR-02.6 実装済み (effective_mode_ パターン)~~ |
 | R-04 | AVX2 MinMax 最適化 | 中 | 未着手 | — | Release ビルドで 21x マージン → 優先度低下 |
-| R-05 | ReBAR/SAM 永続マップド検証 | 低 | 見送り | — | dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照) |
-| R-06 | GPU Compute 間引きの実GPU再検証 | 中 | 完了 | Phase 6 | CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03) |
+| ~~R-05~~ | ~~ReBAR/SAM 永続マップド検証~~ | ~~低~~ | ~~見送り~~ | ~~—~~ | ~~dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照)~~ |
+| ~~R-06~~ | ~~GPU Compute 間引きの実GPU再検証~~ | ~~中~~ | ~~完了~~ | ~~Phase 6~~ | ~~CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03)~~ |
 | R-07 | E2E レイテンシ計測 | 低 | 未着手 | — | NFR-02 検証 |
-| R-08 | マルチスレッド間引き | 中 | 未着手 | — | TI-08: 実パイプライン 3.75 GSPS < BM-B 21 GSPS。4ch 並列化で 4ch×1G 0-drops の可能性 |
+| ~~R-08~~ | ~~マルチスレッド間引き~~ | ~~中~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~std::barrier + worker threads。4ch/8ch×1G 0-drops 達成。decimate_ms 18ms→0.3ms (40-80x)~~ |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
-| R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
-| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: ボトルネックが transport ではなく消費側 (ring drain + cache cold) のため投資対効果低。Embedded でも同水準 drops |
-| R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |
-| R-13 | Release ビルドでの計測標準化 | 高 | 未着手 | — | TI-08: Debug/Release の BM-B 乖離 14x。実パイプライン差は 13% のみだが、計測の信頼性向上のため標準化推奨 |
+| ~~R-10~~ | ~~ネイティブ Vulkan ドライバ検証~~ | ~~高~~ | ~~完了~~ | ~~Phase 7~~ | ~~MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS~~ |
+| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: viewer 側ボトルネックは transport ではなく消費側 → Phase 10-3 で解消。TI-09: SG 側 drops は pipe 帯域限界が原因だが可視化品質影響なし。shm は製品化フェーズで施策 B+F と併せて検討 |
+| ~~R-12~~ | ~~Windows IPC コマンドチャネル実装~~ | ~~中~~ | ~~完了~~ | ~~Phase 9~~ | ~~`PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作~~ |
+| ~~R-13~~ | ~~Release ビルドでの計測標準化~~ | ~~高~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト~~ |
+| R-14 | SG-side drop 緩和策 (バックプレッシャ or pre-decimation) | 低 | PoC 許容 | — | TI-09: SG drops は可視化品質に影響なし。製品化フェーズで施策 B+F を検討 |

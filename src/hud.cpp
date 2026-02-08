@@ -85,7 +85,7 @@ void Hud::new_frame() {
 void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                             double ring_fill, uint32_t vertex_count, bool paused,
                             DecimationMode dec_mode, uint32_t channel_count,
-                            uint64_t total_drops) {
+                            uint64_t total_drops, uint64_t sg_drops) {
     ImGuiIO& io = ImGui::GetIO();
     float bar_height = 44.0f; // two lines
     float screen_width = io.DisplaySize.x;
@@ -117,12 +117,26 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
     else if (vertex_count >= 1'000) { display_vtx = vertex_count / 1e3; vtx_suffix = "K"; }
 
     // Line 1: overview
-    if (total_drops > 0) {
-        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s | DROP: %llu%s",
+    bool has_drops = (total_drops > 0 || sg_drops > 0);
+    if (has_drops) {
+        // Build drop string: "DROP: <viewer>[+SG:<sg>]"
+        char drop_str[64];
+        if (sg_drops > 0 && total_drops > 0) {
+            std::snprintf(drop_str, sizeof(drop_str), "DROP: %llu+SG:%llu",
+                          static_cast<unsigned long long>(total_drops),
+                          static_cast<unsigned long long>(sg_drops));
+        } else if (sg_drops > 0) {
+            std::snprintf(drop_str, sizeof(drop_str), "SG-DROP: %llu",
+                          static_cast<unsigned long long>(sg_drops));
+        } else {
+            std::snprintf(drop_str, sizeof(drop_str), "DROP: %llu",
+                          static_cast<unsigned long long>(total_drops));
+        }
+        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s | %s%s",
                     bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
                     ring_fill * 100.0, display_vtx, vtx_suffix,
                     DecimationThread::mode_name(dec_mode),
-                    static_cast<unsigned long long>(total_drops),
+                    drop_str,
                     paused ? " | PAUSED" : "");
     } else {
         ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",

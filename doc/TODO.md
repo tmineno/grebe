@@ -105,77 +105,74 @@
 - [x] **pipe/buffer 側改善の投資対効果評価**: マルチスレッド間引き (中), リングサイズ拡大 (低リスク), adaptive block (中)
 - [x] **判定**: TI-08 に記録。shm 延期続行。実パイプライン 3.75 GSPS vs BM-B 21 GSPS の乖離解消が本質
 
+### Phase 10-3: パイプラインボトルネック解消
+
+- [x] リングバッファデフォルト拡大 (16M → 64M)
+- [x] Debug ビルド計測警告 (`--profile`/`--bench` で `spdlog::warn`)
+- [x] マルチスレッド間引き (`std::barrier` + worker threads, 4ch→4 workers, 8ch→4 workers)
+- [x] 受入条件: 4ch/8ch × 1 GSPS Embedded で 0 drops 達成
+
+### Phase 10-4: SG-side Drop 評価 (TI-09)
+
+- [x] `FrameHeaderV2` に `sg_drops_total` フィールド追加、IPC パイプライン全体で伝搬
+- [x] `--profile` レポートに SG drops 計測追加 (JSON + stdout テーブル)
+- [x] HUD に SG drops 表示 (viewer drops との区別表記)
+- [x] IPC vs Embedded 定量比較: 4ch×1G SG drops ~7.9G (37%), 8ch×1G ~34.3G (79%)
+- [x] TI-09 執筆: 可視化品質影響なし (MinMax 3840 vtx/ch 不変)、緩和策マトリクス、PoC 許容判定
+
 ---
 
-## 次期マイルストーン（実装予定）
+## PoC 達成状況サマリ
 
-### Phase 11: Shared Memory IPC 基盤（延期）
+| PoC 目的 | ステータス | 根拠 |
+|---|---|---|
+| 1 GSPS リアルタイム描画 | **達成** | L0-L3 全 PASS (L3=2,022 FPS) |
+| パイプライン各段の定量計測 | **達成** | TI-01~09, BM-A/B/C/E |
+| ボトルネック特定・解消 | **達成** | CPU 間引き律速 → マルチスレッドで 0-drops |
+| マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
+| プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
+| E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
 
-**目標:** Pipe transport を Shared Memory に置換し、パイプ帯域制約を排除する。
-**リスク:** 高（OS API 依存、同期プリミティブ、障害復旧の複雑さ）
-**前提:** Phase 10 の Go/No-Go で shm 移行が必要と判定されていること。
-**状態:** Phase 10 で pipe 最適化が十分な帯域を達成したため延期。必要になった時点で再開。
+---
 
-**リスク緩和策:**
-- 各サブステップ完了時に pipe fallback を維持し、shm 不具合時に `--transport=pipe` で切り戻し可能とする
-- 10a 完了時点で帯域計測を実施し、pipe 比で 3x 以上の改善がなければ 10b/10c の投資対効果を再評価する
-- WSL2 の shm 実装制約（POSIX shm_open のメモリ上限、Windows 側とのメモリ可視性）を事前調査する
+## 次期マイルストーン候補（優先度順）
 
-Phase 11 は段階的に実装し、各ステップで動作確認を行う:
+### Phase 11: E2E レイテンシ計測（NFR-02 検証）
 
-#### 11a: 基本 Shared Memory Ring
-
-- [ ] WSL2 / Linux / Windows での shm API 動作確認（shm_open, CreateFileMapping の挙動差調査）
-- [ ] POSIX shm_open / Win32 CreateFileMapping の抽象化
-- [ ] `DataRingV2` 固定長リング実装（block_length=65536, slots=64）
-- [ ] `FrameHeaderV2` header + channel-major payload 書き込み/読み出し
-- [ ] FrameHeaderV2 header CRC32C 検証
-- [ ] **帯域計測**: pipe IPC との A/B 比較（1ch/4ch × 全レート）、TI-07 追記
-- [ ] **Go/No-Go**: pipe 比 3x 未満の改善なら 11b/11c の投資判断を再検討
-
-**受入条件:** `--transport=shm` で 1ch×1 GSPS が無欠落動作。pipe fallback が維持されていること。
-
-#### 11b: 制御ブロックと Discovery
-
-- [ ] `ControlBlockV2` (`grebe-ipc-ctrl`): magic/abi_version/generation/heartbeat/config
-- [ ] `ConsumerStatusBlockV2` (`grebe-ipc-cons`): read_sequence/credits/heartbeat
-- [ ] `grebe` 起動時の ControlBlock 読み取り → DataRing attach フロー
-- [ ] `--attach-sg` による既存 `grebe-sg` 接続モード
-
-**受入条件:** `grebe-sg` を先行起動し、`grebe --attach-sg` で接続して波形表示できること。
-
-#### 11c: フロー制御と障害復旧
-
-- [ ] Credit-based window 制御（inflight < credits_granted で publish 許可）
-- [ ] Credit 枯渇時 drop-new（loss-tolerant realtime）
-- [ ] Producer/Consumer heartbeat 監視 + timeout 検出
-- [ ] `grebe-sg` 再起動時の再接続/復旧（generation bump → reattach）
-- [ ] 世代切替時の旧 shared memory segment cleanup（unlink/close + best-effort detach）
-- [ ] 設定変更は generation bump 経由のみ（in-place config 書き換え禁止）
-- [ ] 基本メトリクス（throughput/drop/enqueue/dequeue/inflight/credits）
-
-**受入条件:** `grebe-sg` を kill → 再起動して `grebe` が自動復帰すること。1 時間連続実行でリーク/ハングなし。
-
-### Phase 12: トランスポート計測とプロファイル統合
-
-**目標:** IPC パフォーマンスを定量計測し、既存プロファイル基盤に統合する。
+**目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
 **リスク:** 低（計測コード追加が主、既存動作への影響なし）
+**優先度:** 高 — PoC 要件定義 (NFR-02) の唯一の未検証項目。
 
-- [ ] SG timestamp → grebe render timestamp の E2E delta 計測
-- [ ] `--profile` JSON/CSV に transport メトリクス追加（throughput, drops, latency）
-- [ ] Shared Memory baseline 計測値の記録（TI-07 に shm セクション追記）
-- [ ] pipe vs shm の性能比較レポート整備
+- [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
+- [ ] HUD に E2E latency 表示追加
+- [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
+- [ ] Embedded / IPC 両モードでの計測・比較
+- [ ] TI-10 に計測結果と分析を記録
 
-**受入条件:** `--profile` レポートに transport 指標が含まれ、pipe/shm 切替で比較可能なこと。
+**受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
 
-### Phase 13: 外部 I/F 評価向け拡張点
+### Phase 12: IPC 堅牢性向上（選択的実装）
 
-**目標:** Transport 差し替え可能な構造を確定し、評価用シミュレータを追加する。
-**リスク:** 低〜中（抽象 I/F は Phase 8 で導入済み、シミュレータは新規）
+**目標:** 現行 pipe IPC の信頼性を向上させる。shm 移行なしで実施可能な改善。
+**リスク:** 低〜中
+**優先度:** 中 — PoC としては許容済み (TI-09) だが、デモ品質向上に有効。
 
-- [ ] トランスポート差し替え可能な抽象 I/F を確定（Phase 8 の I/F を最終化）
-- [ ] 帯域制限/遅延注入可能なシミュレータバックエンドを追加
-- [ ] pipe / shm / シミュレータの 3 バックエンドでの比較レポート
+- [ ] FrameHeaderV2 の `header_crc32c` 検証実装（FR-10.8, 現在はプレースホルダ）
+- [ ] FrameHeaderV2 互換性/バージョニングポリシー策定（`header_bytes` による前方/後方互換パース、バージョン不一致時の明示的エラー）(#4)
+- [ ] grebe-sg プロセス死活監視（pipe EOF 以外の異常検知強化）
+- [ ] 1 時間連続実行安定性テスト (NFR-04/06)
+
+**受入条件:** CRC 不一致フレーム破棄が動作。1 時間連続実行でリーク/ハング/クラッシュなし。
+
+### Phase 13: トランスポートシミュレータ
+
+**目標:** 帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
+**リスク:** 低〜中（Transport 抽象 I/F は Phase 8 で導入済み）
+**優先度:** 中 — 製品化判断に有用。shm 非依存で実施可能。
+
+- [ ] トランスポート抽象 I/F の最終化（Phase 8 の I/F をレビュー）
+- [ ] `--transport=sim` シミュレータバックエンド実装（帯域制限/遅延注入）
+- [ ] pipe / sim の比較プロファイルレポート
 
 **受入条件:** `--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
 
@@ -199,17 +196,41 @@ Phase 11 は段階的に実装し、各ステップで動作確認を行う:
 
 ---
 
+## 延期マイルストーン（トリガー条件付き）
+
+### Shared Memory IPC 基盤
+
+**状態:** Phase 10 (TI-08) + Phase 10-4 (TI-09) の分析で **延期判定**。
+
+**延期理由:**
+- ボトルネックが pipe transport ではなく消費側 (ring drain + cache cold) にあったが、Phase 10-3 で解消済み
+- Embedded モードが 0-drops のリファレンス動作として確立
+- IPC mode の SG-side drops は可視化品質に影響なし (MinMax 3840 vtx/ch 不変)
+- 実装コスト高 (OS API × 3 環境、同期、障害復旧) に対し PoC 価値が限定的
+
+**再開トリガー:**
+1. 実デバイス接続で pipe 帯域が律速となるユースケースが出現した場合
+2. 製品化フェーズでプロセス間の確実なフロー制御が必要になった場合
+3. `--attach-sg` (既存プロセス接続) モードが必要になった場合
+
+**スコープ (再開時):**
+- 11a: 基本 Shared Memory Ring (shm_open / CreateFileMapping 抽象化、DataRingV2)
+- 11b: 制御ブロックと Discovery (ControlBlockV2, ConsumerStatusBlockV2, --attach-sg)
+- 11c: フロー制御と障害復旧 (credit window, heartbeat, generation bump)
+
+---
+
 ## 将来拡張（PoC 後の検討事項）
 
 ### 優先度中
 
-- AVX2 MinMax 最適化（SSE2 → AVX2 で処理幅 8→16 に倍増）
+- AVX2 MinMax 最適化（SSE2 → AVX2, 処理幅 8→16 倍増。ただし現行 21x マージンで必要性低）
+- SG-side pre-decimation（pipe 前に間引き → 帯域要求 ~1000x 削減、TI-09 施策 B）
 
 ### 優先度低
 
-- E2E レイテンシ計測（NFR-02 目標の検証）
-- マルチスレッド並列間引き（2 GSPS+ 向け）
 - 太線描画（Instanced Quad）
+- Header CRC32C → payload CRC32C への拡張
 
 ### 製品化時
 
@@ -220,3 +241,4 @@ Phase 11 は段階的に実装し、各ステップで動作確認を行う:
 - GUI フレームワーク統合（Qt / ImGui 本格UI）
 - リモート表示（WebSocket 経由ブラウザ表示）
 - GPU Direct (RDMA) によるデバイス→VRAM 直接転送
+- Shared Memory IPC + Credit-based flow control（延期マイルストーン参照）

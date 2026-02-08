@@ -4,7 +4,9 @@
 #include "ring_buffer.h"
 
 #include <atomic>
+#include <barrier>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -43,7 +45,20 @@ public:
     static const char* mode_name(DecimationMode m);
 
 private:
+    // Per-worker state for multi-threaded decimation
+    struct WorkerState {
+        std::thread thread;
+        std::vector<uint32_t> assigned_channels;
+        std::vector<std::vector<int16_t>> drain_bufs;    // indexed by assigned channel slot
+        std::vector<std::vector<int16_t>> dec_results;   // indexed by assigned channel slot
+        std::vector<size_t> raw_counts;                   // indexed by assigned channel slot
+        double max_fill = 0.0;
+    };
+
     void thread_func();
+    void thread_func_single();      // 1ch optimized path (no workers)
+    void thread_func_multi();       // multi-ch with worker threads
+    void worker_func(uint32_t worker_id);
 
     std::vector<RingBuffer<int16_t>*> rings_;
     std::thread thread_;
@@ -68,4 +83,10 @@ private:
     std::atomic<double> decimate_time_ms_{0.0};
     std::atomic<double> decimate_ratio_{1.0};
     std::atomic<double> ring_fill_{0.0};
+
+    // Multi-threaded worker state
+    std::vector<WorkerState> workers_;
+    std::unique_ptr<std::barrier<>> start_barrier_;
+    std::unique_ptr<std::barrier<>> done_barrier_;
+    uint32_t num_workers_ = 0;
 };

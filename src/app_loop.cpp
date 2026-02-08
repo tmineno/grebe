@@ -227,11 +227,14 @@ void run_main_loop(AppComponents& app) {
             first_vtx += per_ch_vtx;
         }
 
-        // Compute total drops across all channels
+        // Compute total drops across all channels (viewer-side)
         uint64_t total_drops = 0;
         for (auto* dc : app.drop_counters) {
             if (dc) total_drops += dc->total_dropped();
         }
+
+        // SG-side drops (IPC mode only)
+        uint64_t sg_drops = app.sg_drops_total.load(std::memory_order_relaxed);
 
         // Build ImGui frame
         app.hud->new_frame();
@@ -241,7 +244,8 @@ void run_main_loop(AppComponents& app) {
                                   paused,
                                   app.dec_thread->effective_mode(),
                                   app.num_channels,
-                                  total_drops);
+                                  total_drops,
+                                  sg_drops);
 
         // Render (timed)
         t0 = Benchmark::now();
@@ -268,7 +272,7 @@ void run_main_loop(AppComponents& app) {
             app.profiler->on_frame(*app.benchmark, app.buf_mgr->vertex_count(),
                                    data_rate,
                                    app.dec_thread->ring_fill_ratio(),
-                                   total_drops,
+                                   total_drops, sg_drops,
                                    *app.cmd_queue);
         }
 

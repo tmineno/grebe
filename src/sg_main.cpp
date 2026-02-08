@@ -27,7 +27,7 @@
 struct SgOptions {
     uint32_t num_channels = 1;
     double   sample_rate  = 1'000'000.0;
-    size_t   ring_size    = 16'777'216;  // 16M samples
+    size_t   ring_size    = 67'108'864;  // 64M samples
     uint32_t block_size   = 16384;       // IPC block size (samples/channel/frame)
 };
 
@@ -66,6 +66,7 @@ static void sender_thread_func(
     std::vector<RingBuffer<int16_t>*>& rings,
     PipeProducer& producer,
     DataGenerator& data_gen,
+    std::vector<DropCounter*>& drop_ptrs,
     uint32_t num_channels,
     std::atomic<uint32_t>& block_size_ref,
     std::atomic<bool>& stop_requested)
@@ -111,6 +112,13 @@ static void sender_thread_func(
         header.block_length_samples = block_size;
         header.payload_bytes = num_channels * block_size * sizeof(int16_t);
         header.sample_rate_hz = data_gen.target_sample_rate();
+
+        // Accumulate SG-side drops from all channels
+        uint64_t sg_drops = 0;
+        for (auto* dc : drop_ptrs) {
+            sg_drops += dc->total_dropped();
+        }
+        header.sg_drops_total = sg_drops;
 
         if (!producer.send_frame(header, payload.data())) {
             spdlog::info("grebe-sg: pipe closed, stopping sender");
@@ -234,7 +242,7 @@ int main(int argc, char* argv[]) {
 
     std::thread sender(sender_thread_func,
                        std::ref(ring_ptrs), std::ref(producer),
-                       std::ref(data_gen),
+                       std::ref(data_gen), std::ref(drop_ptrs),
                        opts.num_channels, std::ref(block_size),
                        std::ref(stop_requested));
 

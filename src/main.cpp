@@ -36,6 +36,7 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
                                uint32_t num_channels,
                                std::atomic<bool>& stop,
                                std::atomic<double>& sample_rate_out,
+                               std::atomic<uint64_t>& sg_drops_out,
                                DecimationThread& dec_thread,
                                std::vector<DropCounter*>& drop_counters) {
     FrameHeaderV2 hdr{};
@@ -54,6 +55,9 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
             sample_rate_out.store(last_rate, std::memory_order_relaxed);
             dec_thread.set_sample_rate(last_rate);
         }
+
+        // Propagate SG-side drops
+        sg_drops_out.store(hdr.sg_drops_total, std::memory_order_relaxed);
 
         uint32_t ch_count = std::min(hdr.channel_count, num_channels);
         for (uint32_t ch = 0; ch < ch_count; ch++) {
@@ -83,6 +87,12 @@ int main(int argc, char* argv[]) {
     try {
         CliOptions opts;
         if (int rc = parse_cli(argc, argv, opts); rc != 0) return rc;
+
+#ifndef NDEBUG
+        if (opts.enable_profile || opts.enable_bench) {
+            spdlog::warn("Running --profile/--bench in Debug build — results are not representative. Use Release.");
+        }
+#endif
 
         // Init GLFW
         if (!glfwInit()) {
@@ -188,7 +198,7 @@ int main(int argc, char* argv[]) {
             std::vector<std::string> sg_args;
             sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
             sg_args.push_back("--block-size=" + std::to_string(opts.block_size));
-            if (opts.ring_size != 16'777'216) {
+            if (opts.ring_size != 67'108'864) {
                 sg_args.push_back("--ring-size=" + std::to_string(opts.ring_size));
             }
 
@@ -260,6 +270,7 @@ int main(int argc, char* argv[]) {
                                               opts.num_channels,
                                               std::ref(ipc_receiver_stop),
                                               std::ref(app.current_sample_rate),
+                                              std::ref(app.sg_drops_total),
                                               std::ref(dec_thread),
                                               std::ref(drop_ptrs));
         }

@@ -51,7 +51,8 @@ struct ScenarioResult {
     MetricStats vertex_count;
     MetricStats data_rate;
     MetricStats ring_fill;
-    uint64_t drop_total = 0;  // net drops during measurement phase
+    uint64_t drop_total = 0;     // net viewer-side drops during measurement phase
+    uint64_t sg_drop_total = 0;  // SG-side drops at end of measurement phase
     bool pass = false;
 };
 
@@ -68,7 +69,7 @@ public:
     // Sets glfwSetWindowShouldClose when all done.
     void on_frame(const Benchmark& bench, uint32_t vertex_count,
                   double data_rate, double ring_fill,
-                  uint64_t total_drops,
+                  uint64_t total_drops, uint64_t sg_drops,
                   AppCommandQueue& cmd_queue);
 
     void set_channel_count(uint32_t n) { channel_count_ = n; }
@@ -91,5 +92,6 @@ private:
     bool scenario_started_ = false;
     bool scenarios_built_ = false;
     uint32_t channel_count_ = 1;
-    uint64_t drops_at_start_ = 0;  // snapshot at scenario start
+    uint64_t drops_at_start_ = 0;     // snapshot at scenario start
+    uint64_t sg_drops_at_start_ = 0;  // snapshot at scenario start (SG-side)
 };
