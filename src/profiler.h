@@ -2,6 +2,7 @@
 
 #include "decimator.h"
 #include "envelope_verifier.h"
+#include "waveform_utils.h"
 
 #include <cstdint>
 #include <string>
@@ -25,6 +26,7 @@ struct FrameSample {
     double ring_fill      = 0.0;
     double window_coverage = 0.0;       // raw_samples / expected_samples_per_frame
     double envelope_match_rate = -1.0;  // -1.0 = skipped
+    double e2e_latency_ms = 0.0;       // producer_ts → render_done
 };
 
 struct MetricStats {
@@ -59,6 +61,7 @@ struct ScenarioResult {
     MetricStats ring_fill;
     MetricStats window_coverage;
     MetricStats envelope_match_rate;  // excludes skipped frames (-1)
+    MetricStats e2e_latency_ms;
     uint64_t drop_total = 0;     // net viewer-side drops during measurement phase
     uint64_t sg_drop_total = 0;  // SG-side drops at end of measurement phase
     uint64_t seq_gaps = 0;       // IPC sequence gaps during measurement phase
@@ -80,6 +83,7 @@ public:
                   double data_rate, double ring_fill,
                   uint64_t total_drops, uint64_t sg_drops,
                   uint64_t seq_gaps, uint32_t raw_samples,
+                  double e2e_latency_ms,
                   AppCommandQueue& cmd_queue,
                   const int16_t* frame_data = nullptr,
                   uint32_t per_ch_vtx = 0,
@@ -118,5 +122,6 @@ private:
 
     DataGenerator* data_gen_ = nullptr;
     std::vector<EnvelopeVerifier> envelope_verifiers_;
+    std::vector<std::vector<int16_t>> ipc_period_buffers_;  // IPC mode: locally-generated period buffers
     bool envelope_verifiers_initialized_ = false;
 };

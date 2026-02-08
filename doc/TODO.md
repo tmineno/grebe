@@ -120,6 +120,15 @@
 - [x] IPC vs Embedded 定量比較: 4ch×1G SG drops ~7.9G (37%), 8ch×1G ~34.3G (79%)
 - [x] TI-09 執筆: 可視化品質影響なし (MinMax 3840 vtx/ch 不変)、緩和策マトリクス、PoC 許容判定
 
+### Phase 12: E2E レイテンシ計測（NFR-02 検証）
+
+- [x] `producer_ts_ns` → 描画完了の E2E delta を計測
+- [x] HUD に E2E latency 表示追加
+- [x] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
+- [x] Embedded / IPC 両モードでの計測・比較
+- [x] TI-11 に計測結果と分析を記録
+- [x] 受入条件: 全レート NFR-02 PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms)
+
 ---
 
 ## PoC 達成状況サマリ
@@ -132,8 +141,8 @@
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
 | 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
-| 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC モード envelope 検証 (未着手) |
-| E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
+| 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC ≤100 MSPS 100%, 4ch×1G 99.2% (R-17 完了) |
+| E2E レイテンシ (NFR-02) | **達成** | TI-11: 全レート PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms) |
 
 ### Phase 11: 波形表示整合性検証（NFR-02b）
 
@@ -181,55 +190,24 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 - [x] Embedded 4ch × 全レート: envelope 一致率 100%
 - [ ] Windows MSVC Release でも同等の結果 — Linux 検証完了、Windows は未検証（環境依存要素なく低リスク）
 
+### Phase 11d: IPC モード Envelope 検証
+
+- [x] 周波数計算 + period buffer 生成を `src/waveform_utils.h` に共通ユーティリティとして抽出
+- [x] DataGenerator を `waveform_utils` 使用にリファクタ (single source of truth)
+- [x] Profiler: IPC モード時に sample_rate_hz + Sine 前提で EnvelopeVerifier を初期化
+- [x] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
+- [x] 計測実行: IPC 1ch×1G 100%, 4ch×1G 99.2% (SG drops 影響)
+- [x] TI-10 Phase 11d セクション追記、R-17 完了
+
+**受入条件:**
+- [x] IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%
+- [x] IPC 1ch × 1 GSPS: envelope 100%
+- [x] IPC 4ch × 1 GSPS: envelope 99.2% (TI-10 に定量計測値記録)
+- [x] `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される
+
 ---
 
 ## 次期マイルストーン候補（優先度順）
-
-### Phase 12: E2E レイテンシ計測（NFR-02 検証）
-
-**目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
-**リスク:** 低（計測コード追加が主、既存動作への影響なし）
-**優先度:** **高** — PoC 要件定義 (NFR-02) の唯一の未検証項目。低複雑度で PoC 完了度を大きく向上。
-
-- [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
-- [ ] HUD に E2E latency 表示追加
-- [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
-- [ ] Embedded / IPC 両モードでの計測・比較
-- [ ] TI-11 に計測結果と分析を記録
-
-**受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
-
-### Phase 11d: IPC モード Envelope 検証
-
-**目標:** IPC モードで envelope 検証を有効化し、全レートで envelope 一致率を定量計測する。≤100 MSPS (SG drops = 0) では Embedded 同等の 100% を達成する。
-**リスク:** 低（profiler 内の period buffer 再構築 + verifier 初期化変更のみ。IPC プロトコル変更なし）
-**優先度:** **中** — Phase 11 の残課題。IPC モードの品質証明を完結させる。
-
-**背景:**
-現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。Phase 11c で EnvelopeVerifier に必要なのは `period_buf` + `period_len` のみであることが確認された。IPC モードでも period buffer を再構築するための入力は全て利用可能:
-
-1. `sample_rate_hz` — FrameHeaderV2 から取得済み
-2. 周波数 — `max(180.0, 3.0 * sample_rate / 1e6)` で算出（DataGenerator と同一式）
-3. 波形タイプ — `--profile` モードのデフォルトは全チャンネル Sine
-4. Per-channel phase offset — `π × ch / num_channels`
-
-SG drops (≥1 GSPS) は受信データの位相不連続を生じるが、周期波形では各バケットの (min, max) ペアが周期内のいずれかのウィンドウ位置に対応するため、envelope 妥当性への影響は限定的と予測される（定量検証で確認）。
-
-**アプローチ:**
-- 周波数計算 + period buffer 生成ロジックを DataGenerator から抽出し `grebe_common` 共通ユーティリティ化
-- Profiler: IPC モード時に `FrameHeaderV2.sample_rate_hz` + Sine 前提で period buffer を自力構築し EnvelopeVerifier を初期化
-- Phase 11c の lazy-caching verifier をそのまま流用
-
-- [ ] 周波数計算 + period buffer 生成を `grebe_common` に共通ユーティリティとして抽出
-- [ ] Profiler: IPC モード時に sample_rate_hz + Sine 前提で EnvelopeVerifier を初期化
-- [ ] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
-- [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録（SG drops 影響評価）
-- [ ] TI-10 Phase 11d セクション追記
-
-**受入条件:**
-- IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%（SG drops = 0 のため Embedded と同等）
-- IPC 1ch/4ch × 1 GSPS: envelope 定量計測値が JSON に記録され、TI-10 に分析が含まれる
-- `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される（-1.0 ではない）
 
 ### Phase 13.5: 回帰検証マトリクス
 

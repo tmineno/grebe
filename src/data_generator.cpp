@@ -1,5 +1,6 @@
 #include "data_generator.h"
 #include "drop_counter.h"
+#include "waveform_utils.h"
 
 #ifdef _MSC_VER
 #define _USE_MATH_DEFINES
@@ -148,7 +149,7 @@ void DataGenerator::rebuild_period_buffer(double sample_rate, double frequency) 
     size_t num_channels = ring_buffers_.size();
     channel_states_.resize(num_channels);
 
-    size_t period_len = std::max(size_t(1), static_cast<size_t>(std::round(sample_rate / frequency)));
+    size_t period_len = waveform_utils::compute_period_length(sample_rate, frequency);
     constexpr size_t NOISE_BUF_SIZE = 1'048'576;
 
     for (size_t ch = 0; ch < num_channels; ch++) {
@@ -232,7 +233,7 @@ void DataGenerator::thread_func() {
         size_t batch_size = high_rate ? BATCH_SIZE_HIGH : BATCH_SIZE_LOW;
 
         // Scale frequency so ~3 cycles are visible per frame at 60 FPS
-        double frequency = std::max(180.0, 3.0 * sample_rate / 1'000'000.0);
+        double frequency = waveform_utils::compute_frequency(sample_rate);
 
         // Read per-channel waveform types
         size_t num_channels = ring_buffers_.size();
@@ -356,6 +357,12 @@ void DataGenerator::thread_func() {
         // Track total samples (per-channel count)
         samples_generated += batch_size;
         total_samples_.store(samples_generated, std::memory_order_relaxed);
+
+        // Timestamp for E2E latency measurement (Phase 12)
+        last_push_ts_ns_.store(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now().time_since_epoch()).count()),
+            std::memory_order_relaxed);
 
         // Rate measurement (update every 100ms) — must be before backpressure
         // check, otherwise backpressure `continue` skips counting generated batches

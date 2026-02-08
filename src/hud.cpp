@@ -86,7 +86,8 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                             double ring_fill, uint32_t vertex_count, bool paused,
                             DecimationMode dec_mode, uint32_t channel_count,
                             uint64_t total_drops, uint64_t sg_drops,
-                            uint64_t seq_gaps, double window_coverage) {
+                            uint64_t seq_gaps, double window_coverage,
+                            double e2e_latency_ms) {
     ImGuiIO& io = ImGui::GetIO();
     float bar_height = 44.0f; // two lines
     float screen_width = io.DisplaySize.x;
@@ -161,14 +162,15 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                     paused ? " | PAUSED" : "");
     }
 
-    // Line 2: per-phase telemetry + window coverage
-    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f | WCov: %.0f%%",
+    // Line 2: per-phase telemetry + window coverage + E2E latency
+    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f | WCov: %.0f%% | E2E: %.1f ms",
                 bench.drain_time_avg(),
                 bench.decimation_time_avg(), bench.decimation_ratio(),
                 bench.upload_time_avg(),
                 bench.swap_time_avg(), bench.render_time_avg(),
                 bench.samples_per_frame_avg(),
-                window_coverage * 100.0);
+                window_coverage * 100.0,
+                e2e_latency_ms);
 
     ImGui::End();
 }

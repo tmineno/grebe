@@ -38,6 +38,7 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
                                std::atomic<double>& sample_rate_out,
                                std::atomic<uint64_t>& sg_drops_out,
                                std::atomic<uint64_t>& seq_gaps_out,
+                               std::atomic<uint64_t>& producer_ts_out,
                                DecimationThread& dec_thread,
                                std::vector<DropCounter*>& drop_counters) {
     FrameHeaderV2 hdr{};
@@ -67,8 +68,9 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
             dec_thread.set_sample_rate(last_rate);
         }
 
-        // Propagate SG-side drops
+        // Propagate SG-side drops and producer timestamp
         sg_drops_out.store(hdr.sg_drops_total, std::memory_order_relaxed);
+        producer_ts_out.store(hdr.producer_ts_ns, std::memory_order_relaxed);
 
         uint32_t ch_count = std::min(hdr.channel_count, num_channels);
         for (uint32_t ch = 0; ch < ch_count; ch++) {
@@ -293,6 +295,7 @@ int main(int argc, char* argv[]) {
                                               std::ref(app.current_sample_rate),
                                               std::ref(app.sg_drops_total),
                                               std::ref(app.seq_gaps),
+                                              std::ref(app.latest_producer_ts_ns),
                                               std::ref(dec_thread),
                                               std::ref(drop_ptrs));
         }
