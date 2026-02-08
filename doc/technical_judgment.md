@@ -14,6 +14,7 @@
 | 2026-02-08 | Phase 9 | TI-07 IPC パイプ帯域と欠落率。anonymous pipe IPC vs embedded の性能比較。R-11追加 |
 | 2026-02-08 | Phase 9 | TI-07 Windows ネイティブ追記。R-12 解消 (PeekNamedPipe)。Windows パイプ帯域 ~10-36 MB/s (WSL2 比 1/10〜1/30) |
 | 2026-02-08 | Phase 10 | TI-07 Pipe 最適化後追記。バッファ 1MB + block 16K/64K + writev。Windows 帯域 ~10→~100-470 MB/s。Go/No-Go: Phase 11 延期 |
+| 2026-02-08 | Phase 10-2 | TI-08 ボトルネック再評価。WSL2 Release 検証で drops 根本原因はパイプラインスループット（キャッシュ冷えデータ）と判明。shm 延期続行 |
 
 ---
 
@@ -28,7 +29,7 @@
 | TI-05 | 永続マップドバッファ | 検証不可 (現設計で恩恵皆無) | 2026-02-07 |
 | TI-06 | スレッドモデル | 回答済み | 2026-02-07 |
 | TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
-| TI-08 | IPC ボトルネック再評価と次ステップ判定 | 未着手 | — |
+| TI-08 | IPC ボトルネック再評価と次ステップ判定 | 回答済み | 2026-02-08 |
 
 ---
 
@@ -550,6 +551,112 @@
 
 ---
 
+## TI-08: IPC ボトルネック再評価と次ステップ判定
+
+> Phase 10 の pipe 最適化結果から残存ボトルネックを特定し、shm 実装 vs pipe/buffer 改善のどちらが本質的な問題に対する最適なアプローチかを評価する。
+
+### 2026-02-08 Phase 10-2 (WSL2 dzn + Windows Native)
+
+**背景と仮説**
+
+Phase 10 でパイプ帯域は大幅に改善されたが、4ch×1GSPS で大量の drops が残存。
+
+初期仮説: 「4ch×1G の drops は decimation thread のスループット不足 (Debug ~1.5 GSPS vs 4 GSPS 要求) が根本原因であり、Release ビルド (~21 GSPS) で解消される。transport 方式 (pipe/shm) は無関係。」
+
+根拠: **WSL2 Embedded モード (パイプなし) の 4ch×1G で 2.4G drops 発生** — パイプが一切関与しない状態でもドロップが発生。
+
+**1. ボトルネック定量分析: 間引きスループット vs 要求量**
+
+| 構成 | BM-B 間引きスループット | 4ch×1G 要求量 | BM-B 余裕率 | 実パイプライン余裕率 |
+|---|---|---|---|---|
+| GCC Debug | ~1.5 GSPS | 4 GSPS | 0.38x (不足) | — |
+| GCC Release | ~21.5 GSPS | 4 GSPS | 5.4x (余裕) | 0.94x (不足) |
+| MSVC Release | ~19.8 GSPS (SIMD) | 4 GSPS | 5.0x (余裕) | — |
+
+注: BM-B はキャッシュ暖機済みバッファ上の純アルゴリズム計測。実パイプラインはリングバッファ drain + キャッシュ冷えデータにより大幅に低下。
+
+**2. WSL2 Release 検証結果 — 仮説の部分的棄却**
+
+GCC Release ビルドで 4ch プロファイルを再計測。リングバッファ 64M、V-Sync ON。
+
+| 構成 | 4ch×1G Drops | smp/f avg | decimate_ms avg | ring_fill avg/max | FPS |
+|---|---|---|---|---|---|
+| **Release Embedded** | 2,130,509,824 | 68,259,483 | 18.19 | 0.149 / 0.184 | 56.4 |
+| **Release IPC block=16384** | 2,412,101,632 | 47,669,370 | 31.51 | 0.100 / 0.199 | 54.6 |
+| **Release IPC block=65536** | 2,003,763,200 | 23,311,078 | 15.64 | 0.049 / 0.348 | 56.0 |
+| Debug Embedded (Phase 9) | 2,447,638,528 | 60,333,471 | — | — | 57.3 |
+| Debug IPC block=16384 | 1,063,124,992 | 18,957,171 | 11.56 | 0.061 / 0.207 | — |
+| Debug IPC block=65536 | 2,582,249,472 | 45,293,051 | 28.83 | 0.093 / 0.208 | — |
+
+**仮説検証結果: Release Embedded でも 2.13G drops が発生。Release vs Debug の改善は 13% のみ (2.45G → 2.13G)。初期仮説は棄却。**
+
+**3. 実パイプラインスループット分析**
+
+BM-B ベンチマーク (21 GSPS) と実パイプライン性能の乖離を定量化:
+
+| 構成 | smp/f | decimate_ms | 実効スループット | BM-B 比 | 乖離要因 |
+|---|---|---|---|---|---|
+| Release Embedded | 68.3M | 18.19ms | 3.75 GSPS | 0.17x | ring drain + cache cold |
+| Release IPC 16K | 47.7M | 31.51ms | 1.51 GSPS | 0.07x | + IPC receiver contention |
+| Release IPC 64K | 23.3M | 15.64ms | 1.49 GSPS | 0.07x | + IPC receiver contention |
+
+**根本原因: 実パイプラインのスループットは BM-B の 7-17% にまで低下する。** 主因:
+
+1. **キャッシュ冷えデータ**: 4ch×1G で 1 フレームあたり ~136 MB のデータをリングバッファから読み出す。L3 キャッシュ (64 MB) を超過し、メモリ帯域が律速。BM-B はキャッシュ暖機済みのため乖離が生じる。
+2. **リングバッファ drain オーバーヘッド**: pop_bulk の memcpy (circular buffer → linear buffer) でデータを二重読み。
+3. **4ch 逐次処理**: 間引きスレッドは 4 チャンネルを逐次処理。チャンネル切替時にキャッシュラインが追い出される。
+4. **IPC 受信スレッドとの競合**: IPC モードでは receiver thread が同じリングバッファに書き込み、cache line bouncing が発生。
+
+**4. Embedded vs IPC の drop 比較 — パイプ起因 vs 消費側起因の切り分け**
+
+| 比較 | 結論 |
+|---|---|
+| Embedded 2.13G ≈ IPC 64K 2.00G | パイプなし/ありで drops 同水準 → **transport は原因ではない** |
+| IPC 16K (2.41G) > Embedded (2.13G) | burst 到着パターンがリング overflow を増加させる |
+| Release (2.13G) ≈ Debug (2.45G) | Debug/Release 差は 13% → **アルゴリズム速度も主因ではない** |
+| **共通要因**: メモリアクセスパターン | ring drain + cache cold + sequential 4ch → 全構成で同水準の drops |
+
+**5. block_size 16384 vs 65536 の挙動差分析**
+
+Windows Release:
+- block=16384: 5.29G drops — pipe が高帯域で burst 配信 → リング一時的 overflow
+- block=65536: 0 drops — sender thread の大ブロック送信が自然にレート抑制
+
+WSL2 Release:
+- block=16384: 2.41G (Embedded 2.13G より多い) — burst 到着がリング overflow を悪化
+- block=65536: 2.00G (Embedded 2.13G より少ない) — ブロックサイズがパイプ帯域を自然に制限
+
+**結論: ブロックサイズは sender のレート制御に間接的に影響する。** 大ブロックは送信間隔が長く、到着レートが平滑化される。小ブロックは burst 到着しやすく、リング overflow のリスクが増加。
+
+**6. shm vs pipe/buffer 改善の投資対効果マトリクス**
+
+| 観点 | shm 実装 | pipe (現行最適化済み) | 消費側改善 |
+|---|---|---|---|
+| **帯域** | メモリ帯域 (~40 GB/s) | ~400-470 MB/s | — |
+| **現在のボトルネックへの効果** | **なし** (消費側が律速) | — | **直接解消** |
+| **Embedded drops (2.13G) への効果** | なし (transport 無関係) | — | 解消可能 |
+| **実装コスト** | 高 (OS API, 同期, 障害復旧) | 低 (完了済み) | 中 |
+| **リスク** | 高 (WSL2 shm 制約, デバッグ困難) | 低 | 中 |
+| **4ch×1G 0-drops 達成の蓋然性** | 低 (ボトルネック非該当) | — | 中-高 |
+
+**7. 推奨次ステップ**
+
+| 優先度 | 施策 | 期待効果 | コスト | 根拠 |
+|---|---|---|---|---|
+| 高 | Release ビルドでの計測を標準化 | Debug の人為的制約排除 | なし | TI-02 の 14x 乖離を計測から除外 |
+| 中 | マルチスレッド間引き (4ch → 2+2 並列) | 4ch throughput 2x, cache 効率改善 | 中 | 実効 3.75 GSPS → ~7 GSPS で 4ch×1G 余裕 |
+| 中 | リングバッファサイズ拡大 (64M → 256M) | burst overflow 吸収 | 低 | block=16K の burst overflow 対策 |
+| 低 | adaptive block size | sender レート制御平滑化 | 中 | block=64K の 0-drops 挙動を自動化 |
+| **低** | **shm 実装 (Phase 11)** | パイプ帯域制約排除 | **高** | **ボトルネック非該当のため投資対効果が低い** |
+
+**判定**
+
+- **shm 実装 (Phase 11): 引き続き延期。** ボトルネックが transport ではなく消費側 (ring drain + cache cold data) にあるため、shm で解決できる問題が存在しない。Embedded モードでも同水準の drops が発生することが決定的な証拠。
+- **shm 再検討条件:** Release ビルドで pipe 帯域がボトルネックとなるユースケースが出現した場合。具体的には、消費側改善により実効スループットが pipe 帯域 (~400 MB/s ≈ 200 MSPS×2ch) を超過した場合。
+- **4ch×1G の drops は PoC として許容可能。** FPS は 54-56 を維持し、MinMax デシメーション後の頂点数 (3840/ch) は不変。drops はデシメーション入力の時間窓が狭まるのみで、可視化品質への影響は軽微。
+
+---
+
 ## 推奨事項トラッカー
 
 `doc/technical_judgment.md` で提起された推奨事項の対応状況を追跡する。
@@ -563,8 +670,9 @@
 | R-05 | ReBAR/SAM 永続マップド検証 | 低 | 見送り | — | dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照) |
 | R-06 | GPU Compute 間引きの実GPU再検証 | 中 | 完了 | Phase 6 | CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03) |
 | R-07 | E2E レイテンシ計測 | 低 | 未着手 | — | NFR-02 検証 |
-| R-08 | マルチスレッド間引き | 低 | 未着手 | — | Release で 21x マージン → 必要性さらに低下 |
+| R-08 | マルチスレッド間引き | 中 | 未着手 | — | TI-08: 実パイプライン 3.75 GSPS < BM-B 21 GSPS。4ch 並列化で 4ch×1G 0-drops の可能性 |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
-| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | Phase 10 pipe 最適化で Windows ~114 MB/s 達成。Go/No-Go で延期判定。4ch×1G の ring overflow 対策で再検討 |
+| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: ボトルネックが transport ではなく消費側 (ring drain + cache cold) のため投資対効果低。Embedded でも同水準 drops |
 | R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |
+| R-13 | Release ビルドでの計測標準化 | 高 | 未着手 | — | TI-08: Debug/Release の BM-B 乖離 14x。実パイプライン差は 13% のみだが、計測の信頼性向上のため標準化推奨 |

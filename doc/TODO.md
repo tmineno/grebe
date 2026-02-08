@@ -98,41 +98,16 @@
 - [x] TI-07 追記: 最適化前後の帯域比較（WSL2 + Windows ネイティブ）
 - [x] Go/No-Go 判定: Windows ネイティブ >100 MB/s 達成 → **Phase 11 延期**
 
+### Phase 10-2: IPC ボトルネック再評価と次ステップ判定
+
+- [x] **ボトルネック分析**: WSL2 Release 検証で Embedded 4ch×1G = 2.13G drops (パイプなし) を確認。根本原因は transport ではなくパイプラインスループット (cache cold data + ring drain overhead)
+- [x] **shm 実装の投資対効果評価**: ボトルネック非該当のため投資対効果低。Embedded でも同水準 drops
+- [x] **pipe/buffer 側改善の投資対効果評価**: マルチスレッド間引き (中), リングサイズ拡大 (低リスク), adaptive block (中)
+- [x] **判定**: TI-08 に記録。shm 延期続行。実パイプライン 3.75 GSPS vs BM-B 21 GSPS の乖離解消が本質
+
 ---
 
 ## 次期マイルストーン（実装予定）
-
-### Phase 10-2: IPC ボトルネック再評価と次ステップ判定
-
-**目標:** Phase 10 の計測結果から残存ボトルネックを特定し、shm 実装 vs pipe/buffer 改善のどちらが本質的な問題に対する最適なアプローチかを評価する。
-
-**背景:** Phase 10 で pipe 帯域は大幅に改善されたが、4ch×1GSPS で大量の drops が発生。ボトルネックがパイプ帯域から ring buffer overflow / decimation 消費レートへ移行した可能性がある。shm は pipe 帯域を排除するが、本質的なボトルネックが消費側にあるなら投資対効果が低い。
-
-**評価項目:**
-
-- [ ] **ボトルネック分析**: Phase 10 計測データから以下を定量評価
-  - パイプ帯域律速 vs ring buffer overflow vs decimation 消費レート律速の切り分け
-  - Embedded モードの 4ch×1G drops (WSL2: 2.4G) と IPC モードの drops の比較 → パイプ起因 vs 消費側起因の切り分け
-  - block_size 16384 vs 65536 で Windows drops が消滅 (5.29G→0) する原因分析（sender thread のレート制御特性？）
-
-- [ ] **shm 実装の投資対効果評価**
-  - shm で解消される問題: パイプバッファコピー 1 回分のレイテンシ削減、カーネル-ユーザ空間切替コスト排除
-  - shm で解消されない問題: ring buffer overflow、decimation thread の消費レート上限
-  - 実装リスク: OS API 差異 (POSIX shm_open vs Win32 CreateFileMapping)、同期プリミティブ、障害復旧、WSL2 shm 制約
-  - 実装コスト見積: 11a/11b/11c の段階的実装 → 投下工数が大きい
-
-- [ ] **pipe/buffer 側改善の投資対効果評価**
-  - 改善候補: ring buffer サイズ拡大 (64M→256M+)、decimation thread マルチスレッド化、adaptive block size
-  - 改善で解消される問題: ring overflow (バッファ拡大)、消費レート上限 (並列化)
-  - 実装リスク: 低〜中（既存コードの拡張が主）
-  - 実装コスト見積: 各改善は独立して適用可能、段階的に効果を確認できる
-
-- [ ] **判定と次ステップ記録**: TI-08 として以下を文書化
-  - ボトルネック分析の結論
-  - shm vs pipe/buffer 改善のリスク・効果比較マトリクス
-  - 推奨する次ステップの根拠
-
-**受入条件:** TI-08 にボトルネック分析と判定根拠が記録され、次フェーズの方向性が決定されていること。
 
 ### Phase 11: Shared Memory IPC 基盤（延期）
 
