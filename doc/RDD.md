@@ -445,6 +445,7 @@ v2 既定値:
 - **FR-11.3:** invalid frame は HUD/ログ/プロファイルで明示し、silent success を禁止する
 - **FR-11.4:** 波形整合性メトリクスを段階的に導入する
   - **PoC tier（Phase 11）:** window coverage ratio、valid frame ratio、既知信号 envelope 検証（MinMax 出力 vs 理論 envelope、±1 LSB 許容）
+  - **PoC tier 改善（Phase 11c）:** 理論バケットサイズ構築による envelope 検証精度向上。`bucket_size = sample_rate / target_fps / num_buckets` で verifier テーブルを事前構築し、高レート (1 GSPS) × 多チャンネル (4ch) で envelope 一致率 100% を達成する
   - **Product tier（将来）:** Embedded/IPC 比較 envelope mismatch rate、peak miss rate、extremum amplitude error（p50/p95/p99）
 - **FR-11.5:** viewer drops と SG drops を別系統で記録し、品質判定に反映する
 
@@ -480,7 +481,8 @@ v2 既定値:
 ### NFR-02b: 波形表示整合性
 
 - 既知合成信号に対する envelope 一致検証を `--profile` で自動実行する
-  - Embedded モード: envelope 一致率 100%（±1 LSB）を必須とする
+  - Embedded モード: envelope 一致率 100%（±1 LSB）を全レート・全チャンネル構成で必須とする
+  - 高レート (≥100 MSPS) では理論バケットサイズ (`sample_rate / target_fps / num_buckets`) に基づく verifier テーブル構築で検証精度を保証する
   - IPC モード: SG-side drops に応じた乖離を定量計測し、TI-10 で評価する
 - sequence continuity（フレーム欠落なし）を検証する
   - Embedded モード: 欠落 0 を必須とする

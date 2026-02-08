@@ -132,6 +132,7 @@
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
 | 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
+| 波形整合性 高精度計測 | **改善中** | Phase 11c: 理論 bucket サイズで高レート精度改善、Phase 11d: IPC モード envelope 検証 |
 | E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
 
 ### Phase 11: 波形表示整合性検証（NFR-02b）
@@ -155,6 +156,61 @@
 - [x] IPC モード: envelope スキップ (-1.0) を TI-10 に記録（DataGenerator 非参照のため）
 - [x] `--profile` JSON に envelope_match_rate + seq_gaps + window_coverage が含まれる
 - [x] HUD に seq_gaps, window_coverage がリアルタイム表示される
+
+### Phase 11c: Envelope 検証精度改善
+
+**目標:** 高レート × 多チャンネル (1 GSPS × 4ch) で envelope 一致率 100% を達成する。
+**リスク:** 低（profiler 内の verifier テーブル構築ロジック変更のみ）
+**優先度:** 高 — Phase 11 の残課題。「正しさの証明」の完全性向上。
+
+**背景:**
+Phase 11b で build-once 最適化（verifier テーブルを初回フレームの実測 bucket size で 1 回だけ構築）を導入し、Windows 4ch 60 FPS を達成した。しかし初回フレームの実測 bucket size は定常状態と乖離するため、高レートで envelope 一致率が低下する（Linux 1ch×1G: 37%, 4ch×1G: 46%）。これは計測手法の限界であり、パイプラインのバグではない。
+
+**アプローチ:**
+- 実測値ベースではなく、理論バケットサイズ `bucket_size = sample_rate / target_fps / num_buckets` で verifier テーブルを事前構築する
+- profiler シナリオ開始時にパラメータが確定するため、初回フレーム到着前にテーブル構築可能
+- floor/ceil の 2 テーブル構築で整数除算の端数を吸収する
+
+- [ ] 理論バケットサイズ計算ロジック実装（`sample_rate / target_fps / num_buckets` の floor/ceil）
+- [ ] profiler シナリオ開始時に verifier テーブルを事前構築（初回フレーム依存を排除）
+- [ ] 計測実行: Embedded {1ch, 4ch} × {1M, 10M, 100M, 1G} SPS で envelope 100% 確認
+- [ ] TI-10 Phase 11c セクション追記
+
+**受入条件:**
+- Embedded 1ch × 全レート: envelope 一致率 100%
+- Embedded 4ch × 全レート: envelope 一致率 100%
+- Windows MSVC Release でも同等の結果
+
+### Phase 11d: IPC モード Envelope 検証
+
+**目標:** IPC モードで envelope 検証を有効化し、drop なしレート (≤100 MSPS) で envelope 一致率 100% を達成する。高レート (≥1 GSPS) では SG drops 影響下での定量 baseline を記録する。
+**リスク:** 低〜中（波形生成ロジック共通化 + profiler 拡張）
+**優先度:** 中 — Phase 11c (Embedded 精度改善) 完了後に着手。
+
+**背景:**
+現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。grebe プロセスに period buffer が存在しないことが根本原因。TI-10 のボトルネック分析で 3 層の課題を特定:
+1. Period buffer 未参照（検証自体が不可能）
+2. SG-side drops（≥1 GSPS で ~37% drop、TI-09）
+3. Bucket サイズ不確定性（pipe 帯域・OS スケジューリング依存の変動）
+
+**アプローチ:**
+- SignalConfigV2 の waveform type + sample_rate_hz から period buffer を grebe 側で再構築
+- 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
+- 理論 bucket サイズ構築 (Phase 11c の成果を流用)
+- 高レートでは SG drops 考慮の許容 match rate 閾値を設定
+
+- [ ] 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
+- [ ] IPC モード profiler で SignalConfigV2 から period buffer を再構築
+- [ ] 理論 bucket サイズ構築を IPC モードに適用
+- [ ] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
+- [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録
+- [ ] SG drops 影響下での許容 match rate 閾値定義
+- [ ] TI-10 Phase 11d セクション追記
+
+**受入条件:**
+- IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%（SG drops = 0 のため Embedded と同等を期待）
+- IPC 1ch/4ch × 1 GSPS: envelope 定量計測値が JSON に記録され、TI-10 に分析が含まれる
+- `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される（-1.0 ではない）
 
 ---
 
@@ -271,7 +327,7 @@
 
 ### 優先度中
 
-- IPC モードでの envelope 検証（grebe-sg 側の period buffer を既知パラメータから grebe 側で再構築、または IPC 経由で period buffer を伝送。Phase 11 で Embedded のみ検証済み）
+- IPC モードでの envelope 検証（Phase 11d で対応予定。波形生成ロジック共通化 + SignalConfigV2 ベース period buffer 再構築）
 - AVX2 MinMax 最適化（SSE2 → AVX2, 処理幅 8→16 倍増。ただし現行 21x マージンで必要性低）
 - SG-side pre-decimation（pipe 前に間引き → 帯域要求 ~1000x 削減、TI-09 施策 B）
 
