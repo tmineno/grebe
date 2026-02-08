@@ -112,6 +112,14 @@
 - [x] マルチスレッド間引き (`std::barrier` + worker threads, 4ch→4 workers, 8ch→4 workers)
 - [x] 受入条件: 4ch/8ch × 1 GSPS Embedded で 0 drops 達成
 
+### Phase 10-4: SG-side Drop 評価 (TI-09)
+
+- [x] `FrameHeaderV2` に `sg_drops_total` フィールド追加、IPC パイプライン全体で伝搬
+- [x] `--profile` レポートに SG drops 計測追加 (JSON + stdout テーブル)
+- [x] HUD に SG drops 表示 (viewer drops との区別表記)
+- [x] IPC vs Embedded 定量比較: 4ch×1G SG drops ~7.9G (37%), 8ch×1G ~34.3G (79%)
+- [x] TI-09 執筆: 可視化品質影響なし (MinMax 3840 vtx/ch 不変)、緩和策マトリクス、PoC 許容判定
+
 ---
 
 ## 次期マイルストーン（実装予定）

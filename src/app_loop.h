@@ -37,6 +37,7 @@ struct AppComponents {
     ITransportConsumer* transport = nullptr;
     std::atomic<double> current_sample_rate{1e6};   // updated by receiver thread in IPC mode
     std::atomic<bool>   current_paused{false};
+    std::atomic<uint64_t> sg_drops_total{0};       // SG-side drops (IPC only)
 };
 
 void run_main_loop(AppComponents& app);
