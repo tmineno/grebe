@@ -94,28 +94,67 @@
 
 ## 次期マイルストーン（実装予定）
 
-### Phase 10: Shared Memory IPC 基盤
+### 現状の IPC 性能ベースライン (TI-07)
 
-**目標:** Pipe transport を Shared Memory に置換し、高スループット IPC を実現する。
+Phase 9 の anonymous pipe IPC 計測結果を Phase 10 以降の判断基準とする。
+
+| 条件 | 実効帯域 | Drops | FPS |
+|---|---|---|---|
+| 1ch × ≤100 MSPS | ~195 MB/s (100% 配信) | 0 | 60.0 |
+| 1ch × 1 GSPS | ~245 MB/s (パイプ飽和) | 0 | 58.7 |
+| 4ch × 100 MSPS | ~325 MB/s (42% 配信) | 0 | 59.4 |
+| 4ch × 1 GSPS | ~337 MB/s (パイプ飽和) | 35M | 56.7 |
+
+**重要な知見:** パイプ帯域 (~300 MB/s) が律速になっても FPS への影響は軽微（サンプル配信量が減るだけでデシメーション後の頂点数は不変）。1ch×100 MSPS 以下の用途では pipe IPC で十分。
+
+### Phase 10: Pipe IPC 最適化
+
+**目標:** 既存 pipe transport のブロックサイズ最適化で、shm 移行前にどこまで改善可能かを確認する。
+**リスク:** 低（既存コードの定数変更が主）
+**Go/No-Go:** 最適化後も 4ch×1 GSPS でドロップが解消しなければ Phase 11 (shm) を開始する。1ch 用途で十分であれば shm を延期可能。
+
+- [ ] ブロックサイズ最適化: 4096 → 16384/65536 の帯域・レイテンシ比較計測
+- [ ] sender thread の write batching 改善（複数ブロックの一括 write(2) 呼び出し）
+- [ ] pipe バッファサイズ拡大（`fcntl(F_SETPIPE_SZ)` による OS パイプバッファ調整）
+- [ ] TI-07 追記: 最適化前後の帯域比較、Go/No-Go 判定記録
+
+**受入条件:** 帯域計測結果と Go/No-Go 判定を TI-07 に追記。改善が不十分な場合は Phase 11 の実施を決定。
+
+### Phase 11: Shared Memory IPC 基盤
+
+**目標:** Pipe transport を Shared Memory に置換し、パイプ帯域制約 (~300 MB/s) を排除する。
 **リスク:** 高（OS API 依存、同期プリミティブ、障害復旧の複雑さ）
+**前提:** Phase 10 の Go/No-Go で shm 移行が必要と判定されていること。
 
-Phase 10 は段階的に実装し、各ステップで動作確認を行う:
+**リスク緩和策:**
+- 各サブステップ完了時に pipe fallback を維持し、shm 不具合時に `--transport=pipe` で切り戻し可能とする
+- 10a 完了時点で帯域計測を実施し、pipe 比で 3x 以上の改善がなければ 10b/10c の投資対効果を再評価する
+- WSL2 の shm 実装制約（POSIX shm_open のメモリ上限、Windows 側とのメモリ可視性）を事前調査する
 
-#### 10a: 基本 Shared Memory Ring
+Phase 11 は段階的に実装し、各ステップで動作確認を行う:
 
+#### 11a: 基本 Shared Memory Ring
+
+- [ ] WSL2 / Linux / Windows での shm API 動作確認（shm_open, CreateFileMapping の挙動差調査）
 - [ ] POSIX shm_open / Win32 CreateFileMapping の抽象化
 - [ ] `DataRingV2` 固定長リング実装（block_length=65536, slots=64）
 - [ ] `FrameHeaderV2` header + channel-major payload 書き込み/読み出し
 - [ ] FrameHeaderV2 header CRC32C 検証
+- [ ] **帯域計測**: pipe IPC との A/B 比較（1ch/4ch × 全レート）、TI-07 追記
+- [ ] **Go/No-Go**: pipe 比 3x 未満の改善なら 11b/11c の投資判断を再検討
 
-#### 10b: 制御ブロックと Discovery
+**受入条件:** `--transport=shm` で 1ch×1 GSPS が無欠落動作。pipe fallback が維持されていること。
+
+#### 11b: 制御ブロックと Discovery
 
 - [ ] `ControlBlockV2` (`grebe-ipc-ctrl`): magic/abi_version/generation/heartbeat/config
 - [ ] `ConsumerStatusBlockV2` (`grebe-ipc-cons`): read_sequence/credits/heartbeat
 - [ ] `grebe` 起動時の ControlBlock 読み取り → DataRing attach フロー
 - [ ] `--attach-sg` による既存 `grebe-sg` 接続モード
 
-#### 10c: フロー制御と障害復旧
+**受入条件:** `grebe-sg` を先行起動し、`grebe --attach-sg` で接続して波形表示できること。
+
+#### 11c: フロー制御と障害復旧
 
 - [ ] Credit-based window 制御（inflight < credits_granted で publish 許可）
 - [ ] Credit 枯渇時 drop-new（loss-tolerant realtime）
@@ -125,23 +164,30 @@ Phase 10 は段階的に実装し、各ステップで動作確認を行う:
 - [ ] 設定変更は generation bump 経由のみ（in-place config 書き換え禁止）
 - [ ] 基本メトリクス（throughput/drop/enqueue/dequeue/inflight/credits）
 
-### Phase 11: トランスポート計測とプロファイル統合
+**受入条件:** `grebe-sg` を kill → 再起動して `grebe` が自動復帰すること。1 時間連続実行でリーク/ハングなし。
+
+### Phase 12: トランスポート計測とプロファイル統合
 
 **目標:** IPC パフォーマンスを定量計測し、既存プロファイル基盤に統合する。
 **リスク:** 低（計測コード追加が主、既存動作への影響なし）
 
 - [ ] SG timestamp → grebe render timestamp の E2E delta 計測
-- [ ] `--profile` JSON/CSV に transport メトリクス追加
-- [ ] Shared Memory baseline 計測値の記録
+- [ ] `--profile` JSON/CSV に transport メトリクス追加（throughput, drops, latency）
+- [ ] Shared Memory baseline 計測値の記録（TI-07 に shm セクション追記）
+- [ ] pipe vs shm の性能比較レポート整備
 
-### Phase 12: 外部 I/F 評価向け拡張点
+**受入条件:** `--profile` レポートに transport 指標が含まれ、pipe/shm 切替で比較可能なこと。
+
+### Phase 13: 外部 I/F 評価向け拡張点
 
 **目標:** Transport 差し替え可能な構造を確定し、評価用シミュレータを追加する。
 **リスク:** 低〜中（抽象 I/F は Phase 8 で導入済み、シミュレータは新規）
 
 - [ ] トランスポート差し替え可能な抽象 I/F を確定（Phase 8 の I/F を最終化）
 - [ ] 帯域制限/遅延注入可能なシミュレータバックエンドを追加
-- [ ] Shared Memory ベースラインとの差分比較レポートを整備
+- [ ] pipe / shm / シミュレータの 3 バックエンドでの比較レポート
+
+**受入条件:** `--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
 
 ---
 
