@@ -164,35 +164,74 @@
 
 **受入条件:** CRC 不一致フレーム破棄が動作。1 時間連続実行でリーク/ハング/クラッシュなし。
 
-### Phase 13: トランスポートシミュレータ
+### Phase 12.5: 回帰検証マトリクス
 
-**目標:** 帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
+**目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
+**リスク:** 低（計測スクリプト追加が主）
+**優先度:** 中 — Phase 12 以降の各フェーズ完了時に実行し、意図しない劣化を早期検知。
+**出典:** [TI-08-Codex-Review §Suggested Validation Matrix](doc/reviews/TI-08-Codex-Review.md)
+
+- [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
+  - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
+  - メトリクス: FPS, viewer drops, SG drops, smp/f, E2E latency (Phase 11 後)
+  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, SG drops 比率安定 (IPC)
+- [ ] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
+- [ ] Phase 12 完了後に初回実行、以後各フェーズ完了時に実行
+
+**受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。
+
+### Phase 13: DataSource 抽象化 + トランスポートシミュレータ
+
+**目標:** データソースの pluggable 抽象化を導入し、帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
 **リスク:** 低〜中（Transport 抽象 I/F は Phase 8 で導入済み）
-**優先度:** 中 — 製品化判断に有用。shm 非依存で実施可能。
+**優先度:** 中 — 製品化判断に有用。DataSource 抽象化は将来デバイス統合の前提条件。
+**出典:** [TI-08-Codex-Review §Architecture Direction](doc/reviews/TI-08-Codex-Review.md)
 
+- [ ] `DataSource` 抽象 I/F 導入（`Synthetic` / 将来 `PCIe` / `USB3` のプラグイン境界）
+- [ ] 既存 `DataGenerator` を `DataSource` 実装として統合
 - [ ] トランスポート抽象 I/F の最終化（Phase 8 の I/F をレビュー）
 - [ ] `--transport=sim` シミュレータバックエンド実装（帯域制限/遅延注入）
 - [ ] pipe / sim の比較プロファイルレポート
 
-**受入条件:** `--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
+**受入条件:** `DataSource` I/F 経由でデータが供給され、`--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
 
-### Phase 14: Trigger 捕捉と波形整合性保証（SG/Main 同期）
+### Phase 14a: SG Trigger + Capture Window メタデータ
 
-**目標:** SG 側 trigger 判定と Main 側 frame validity 判定を統合し、表示フレームの時間整合性・非破損性を定量保証する。  
-**リスク:** 中（データ経路に capture metadata と判定ロジックを追加）
+**目標:** SG 側で trigger-aware なキャプチャを実装し、capture window 境界をメタデータとして IPC に伝搬する。
+**リスク:** 低〜中（SG 側の変更が主、viewer 側はメタデータ受信のみ）
+**優先度:** 中 — PoC→MVP 遷移の第一歩。timer モードだけでも window coverage 計測が可能になる。
 
-- [ ] SG 側 trigger mode 実装（internal / external / timer fallback）
-- [ ] internal trigger パラメータ実装（level, edge, pre-trigger, post-trigger）
-- [ ] capture window 境界メタデータを IPC header/telemetry に追加
-- [ ] Main 側 frame validity 判定を実装（sequence continuity, CRC, window coverage）
+- [ ] SG 側 trigger mode 実装（timer をデフォルトとし、internal は次段階）
+- [ ] capture window 境界メタデータを IPC header に追加（trigger mode, capture boundary, window coverage）
+- [ ] Main 側で window coverage を受信・表示（HUD + profile レポート）
+
+**受入条件:** timer モードで capture window coverage が HUD と `--profile` JSON に表示されること。
+
+### Phase 14b: Main 側 Frame Validity 判定
+
+**目標:** Main 側で frame validity gating を実装し、invalid frame を明示的に検知・表示する。
+**リスク:** 低〜中（Phase 12 の CRC 実装と連携）
+**優先度:** 中 — Phase 12 (CRC, sequence) の上位レイヤーとして品質保証を追加。
+
+- [ ] Frame validity 判定ロジック（sequence continuity + CRC + window coverage）
 - [ ] invalid frame の HUD/ログ明示（silent success 禁止）
-- [ ] 品質メトリクス実装（envelope mismatch, peak miss rate, extremum error p50/p95/p99）
-- [ ] profile レポートに trigger/validity 指標を統合（viewer drops と SG drops を分離表示）
+- [ ] valid frame ratio を profile レポートに統合
+- [ ] PoC tier 品質メトリクス: window coverage ratio + valid frame ratio
 
-**受入条件:**
-- trigger lock 後の valid frame 率を継続計測できること
-- timer モードで window coverage 下限しきい値（例: 95%）を監視できること
-- IPC/embedded 比較で、FPS/頂点数に加えて波形整合性メトリクスで品質判定できること
+**受入条件:** invalid frame が HUD/ログで明示され、valid frame ratio が `--profile` に含まれること。
+
+### Phase 14c: Trigger 拡張 + 波形忠実度メトリクス（Product tier）
+
+**目標:** internal/external trigger と product-grade 波形忠実度メトリクスを追加する。
+**リスク:** 中〜高（Embedded 基準との同期比較フレームワークが必要）
+**優先度:** 低 — 製品化フェーズで必要になった時点で実施。
+
+- [ ] internal trigger パラメータ実装（level, edge, pre-trigger, post-trigger）
+- [ ] external trigger 入力パス（将来デバイス接続時）
+- [ ] 波形忠実度メトリクス（envelope mismatch rate, peak miss rate, extremum amplitude error p50/p95/p99）
+- [ ] Embedded 基準との同期比較フレームワーク
+
+**受入条件:** IPC/Embedded 比較で波形忠実度メトリクスによる品質判定が可能なこと。
 
 ---
 
@@ -234,7 +273,7 @@
 
 ### 製品化時
 
-- 実デバイス接続（PCIe DMA / USB3 / 10GbE）
+- 実デバイス接続（PCIe DMA / USB3 / 10GbE）— Phase 13 の `DataSource` 抽象 I/F に接続
 - ウォーターフォール / スペクトログラム表示
 - 高度トリガ機能（パターントリガ等）
 - データ録画・再生

@@ -405,7 +405,7 @@ trigger-aware な捕捉を行う。
 ### FR-10: トランスポート抽象化と計測
 
 - **FR-10.1:** `grebe-sg` → `grebe` のデータ搬送は抽象 I/F 経由で実装する
-- **FR-10.2:** 初期実装は Shared memory + `memcpy` とする
+- **FR-10.2:** 初期実装は anonymous pipe とする（Shared memory は延期マイルストーン）
 - **FR-10.3:** 外部インターフェース帯域/遅延評価のため、将来的な代替バックエンドを差し替え可能にする
 - **FR-10.4:** attach/discovery 用に `ControlBlockV2` (`grebe-ipc-ctrl`) を定義する
   - `SignalConfigV2`
@@ -432,10 +432,9 @@ trigger-aware な捕捉を行う。
   - CRC 検証（header/payload）
   - capture window 充足率（不足時 invalid）
 - **FR-11.3:** invalid frame は HUD/ログ/プロファイルで明示し、silent success を禁止する
-- **FR-11.4:** 頂点数/FPSとは独立に、波形整合性メトリクスを評価する
-  - envelope mismatch rate（Embedded 参照比較）
-  - peak miss rate
-  - extremum amplitude error（p50/p95/p99）
+- **FR-11.4:** 波形整合性メトリクスを段階的に導入する
+  - **PoC tier（Phase 14a/b）:** window coverage ratio、valid frame ratio
+  - **Product tier（将来）:** envelope mismatch rate（Embedded 参照比較）、peak miss rate、extremum amplitude error（p50/p95/p99）
 - **FR-11.5:** viewer drops と SG drops を別系統で記録し、品質判定に反映する
 
 ---
@@ -470,8 +469,10 @@ trigger-aware な捕捉を行う。
 ### NFR-02b: トリガ整合性
 
 - trigger lock 後の invalid frame 率を継続監視する
-- periodic timer モードでは window coverage の下限しきい値を定義する（例: 95%）
-- PoC 判定は FPS/頂点数に加えて FR-11.4 の整合性メトリクスを含める
+- periodic timer モードでは window coverage の下限しきい値を定義する
+  - Embedded モード: 95% 以上を目標
+  - IPC モード: SG-side drops の影響により低下する（TI-09: 4ch×1G で ~63%）。モード別に閾値を設定し、pipe 帯域制約下での許容範囲を明記する
+- PoC tier の品質判定は FPS/頂点数 + valid frame ratio + window coverage ratio で行う。Product tier の整合性メトリクス（FR-11.4 product tier）は製品化フェーズで追加する
 
 ### NFR-03: メモリ使用量
 
@@ -543,7 +544,7 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
 | `--attach-sg` | `grebe-sg` を自動起動せず既存プロセスへ接続 |
 | `--sg-path=<path>` | 自動起動時に使用する `grebe-sg` 実行ファイルパス |
-| `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
+| `--transport=<name>` | トランスポート実装選択（現時点 `pipe`。`shared_mem` は延期。将来拡張予約） |
 | `--trigger-mode=<internal\|external\|timer>` | 捕捉モード指定（デフォルト: timer） |
 | `--pre-trigger=<samples>` | pre-trigger サンプル数 |
 | `--post-trigger=<samples>` | post-trigger サンプル数 |
@@ -555,8 +556,8 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 |---|---|
 | `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
 | `--sample-rate=<Hz>` | グローバルサンプルレート初期値 |
-| `--transport=<name>` | トランスポート実装選択（現時点 `shared_mem` のみ。将来拡張予約） |
-| `--segment-name=<name>` | IPC 共有メモリ名 |
+| `--transport=<name>` | トランスポート実装選択（現時点 `pipe`。`shared_mem` は延期。将来拡張予約） |
+| `--segment-name=<name>` | IPC 共有メモリ名（shm 実装時に使用） |
 | `--trigger-mode=<internal\|external\|timer>` | SG 側 trigger モード |
 | `--trigger-level=<int16>` | internal trigger 閾値 |
 | `--trigger-edge=<rising\|falling\|both>` | internal trigger エッジ条件 |
