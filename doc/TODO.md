@@ -169,7 +169,7 @@
 **目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
 **リスク:** 低（計測スクリプト追加が主）
 **優先度:** 中 — Phase 12 以降の各フェーズ完了時に実行し、意図しない劣化を早期検知。
-**出典:** [TI-08-Codex-Review §Suggested Validation Matrix](doc/reviews/TI-08-Codex-Review.md)
+**出典:** TI-08-Codex-Review §Suggested Validation Matrix
 
 - [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
   - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
@@ -185,7 +185,7 @@
 **目標:** データソースの pluggable 抽象化を導入し、帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
 **リスク:** 低〜中（Transport 抽象 I/F は Phase 8 で導入済み）
 **優先度:** 中 — 製品化判断に有用。DataSource 抽象化は将来デバイス統合の前提条件。
-**出典:** [TI-08-Codex-Review §Architecture Direction](doc/reviews/TI-08-Codex-Review.md)
+**出典:** TI-08-Codex-Review §Architecture Direction
 
 - [ ] `DataSource` 抽象 I/F 導入（`Synthetic` / 将来 `PCIe` / `USB3` のプラグイン境界）
 - [ ] 既存 `DataGenerator` を `DataSource` 実装として統合
