@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <vector>
 
 struct EnvelopeResult {
@@ -11,28 +12,31 @@ struct EnvelopeResult {
 
 class EnvelopeVerifier {
 public:
-    // Rebuild lookup tables for new parameters.
-    // Call when period buffer or bucket dimensions change.
-    void rebuild(const int16_t* period_buf, size_t period_len,
-                 size_t bucket_size_floor, size_t bucket_size_ceil);
+    // Set the period buffer for this channel.  Must be called before verify().
+    // The buffer pointer must remain valid for the lifetime of the verifier.
+    void set_period(const int16_t* period_buf, size_t period_len);
 
     // Verify one channel's MinMax decimated output.
     // decimated: interleaved [min0, max0, min1, max1, ...], length = num_buckets * 2
-    EnvelopeResult verify(const int16_t* decimated, uint32_t num_buckets,
-                          size_t raw_sample_count) const;
+    // ch_raw: number of raw input samples that produced this decimated output.
+    // Window sets are built lazily and cached per bucket_size.
+    EnvelopeResult verify(const int16_t* decimated, uint32_t num_buckets, uint32_t ch_raw);
 
-    bool is_ready() const { return ready_; }
-    size_t win_floor() const { return win_floor_; }
-    size_t win_ceil() const { return win_ceil_; }
+    bool is_ready() const { return period_buf_ != nullptr && period_len_ > 0; }
+
+    void clear();
 
 private:
     static uint32_t pack_pair(int16_t lo, int16_t hi);
     static void build_window_set(const int16_t* period_buf, size_t period_len,
                                   size_t window_size, std::vector<uint32_t>& out);
 
-    std::vector<uint32_t> set_floor_;
-    std::vector<uint32_t> set_ceil_;
-    size_t win_floor_ = 0;
-    size_t win_ceil_ = 0;
-    bool ready_ = false;
+    // Ensure the valid set covers the given bucket sizes (build and cache if needed).
+    void ensure_bucket_sizes(size_t bs1, size_t bs2);
+
+    const int16_t* period_buf_ = nullptr;
+    size_t period_len_ = 0;
+
+    // Cache: bucket_size → sorted valid (min, max) pair set
+    std::map<size_t, std::vector<uint32_t>> cache_;
 };

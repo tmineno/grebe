@@ -34,32 +34,12 @@ bool ProfileRunner::should_continue() const {
     return !finished_;
 }
 
-double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
-                                                  uint32_t raw_samples, DecimationMode dec_mode,
-                                                  const std::vector<uint32_t>* per_ch_raw) {
-    // Only verify MinMax mode with periodic waveforms and embedded DataGenerator
-    if (!data_gen_ || dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
-        return -1.0;
-    }
+void ProfileRunner::init_envelope_verifiers() {
+    if (!data_gen_ || envelope_verifiers_initialized_) return;
 
-    uint32_t num_buckets = per_ch_vtx / 2;
-    if (num_buckets == 0) return -1.0;
-
-    // Ensure verifiers vector is sized for channel_count
-    if (envelope_verifiers_.size() != channel_count_) {
-        envelope_verifiers_.resize(channel_count_);
-    }
-
-    double total_match = 0.0;
-    uint32_t verified_channels = 0;
+    envelope_verifiers_.resize(channel_count_);
 
     for (uint32_t ch = 0; ch < channel_count_; ch++) {
-        // Use per-channel raw count if available, else fallback to average
-        uint32_t ch_raw = (per_ch_raw && ch < per_ch_raw->size())
-            ? (*per_ch_raw)[ch]
-            : (raw_samples / channel_count_);
-        if (ch_raw == 0) continue;
-
         // Skip non-periodic waveforms
         WaveformType wf = data_gen_->get_channel_waveform(ch);
         if (wf == WaveformType::WhiteNoise || wf == WaveformType::Chirp) {
@@ -70,19 +50,39 @@ double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint3
         size_t period_len = data_gen_->period_length(ch);
         if (!period_buf || period_len == 0) continue;
 
-        // Build verifier tables once per scenario (at first measurement frame).
-        // Verifiers are cleared at scenario start; rebuild only when not ready.
-        // The ±1 LSB tolerance + floor/ceil dual sets handle frame-to-frame
-        // bucket size variation without needing per-frame rebuilds.
-        size_t floor_bs = static_cast<size_t>(ch_raw) / num_buckets;
-        size_t ceil_bs = (static_cast<size_t>(ch_raw) + num_buckets - 1) / num_buckets;
+        envelope_verifiers_[ch].set_period(period_buf, period_len);
+    }
 
+    envelope_verifiers_initialized_ = true;
+}
+
+double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
+                                                  uint32_t raw_samples, DecimationMode dec_mode,
+                                                  const std::vector<uint32_t>* per_ch_raw) {
+    // Only verify MinMax mode with periodic waveforms and embedded DataGenerator
+    if (!data_gen_ || dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
+        return -1.0;
+    }
+    if (!per_ch_raw || per_ch_raw->empty()) return -1.0;
+
+    uint32_t num_buckets = per_ch_vtx / 2;
+    if (num_buckets == 0) return -1.0;
+
+    if (envelope_verifiers_.size() != channel_count_) {
+        return -1.0;
+    }
+
+    double total_match = 0.0;
+    uint32_t verified_channels = 0;
+
+    for (uint32_t ch = 0; ch < channel_count_; ch++) {
         auto& verifier = envelope_verifiers_[ch];
-        if (!verifier.is_ready()) {
-            verifier.rebuild(period_buf, period_len, floor_bs, ceil_bs);
-        }
+        if (!verifier.is_ready()) continue;
 
-        // Verify this channel's decimated output
+        uint32_t ch_raw = (ch < per_ch_raw->size()) ? (*per_ch_raw)[ch] : 0;
+        if (ch_raw == 0) continue;
+
+        // Verify: lazily builds and caches window sets per bucket_size
         const int16_t* ch_decimated = frame_data + static_cast<size_t>(ch) * per_ch_vtx;
         EnvelopeResult er = verifier.verify(ch_decimated, num_buckets, ch_raw);
 
@@ -120,8 +120,9 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         drops_at_start_ = total_drops;
         sg_drops_at_start_ = sg_drops;
         seq_gaps_at_start_ = seq_gaps;
-        // Reset envelope verifiers for new scenario (bucket sizes will change)
-        envelope_verifiers_.clear();
+        // Clear envelope verifier caches for new scenario (period may change)
+        for (auto& v : envelope_verifiers_) v.clear();
+        envelope_verifiers_initialized_ = false;
         cmd_queue.push(CmdSetSampleRate{scenario.sample_rate});
         spdlog::info("[profile] Starting scenario '{}' (rate={:.0f}, warmup={}, measure={})",
                      scenario.name, scenario.sample_rate,
@@ -130,6 +131,13 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
 
     int total_frames = scenario.warmup_frames + scenario.measure_frames;
     bool in_warmup = frame_in_scenario_ < scenario.warmup_frames;
+
+    // Initialize envelope verifiers after rate change has settled.
+    // CmdSetSampleRate is processed next frame, so wait a few frames for the
+    // DataGenerator to regenerate period buffers and old ring data to drain.
+    if (!envelope_verifiers_initialized_ && frame_in_scenario_ >= 10) {
+        init_envelope_verifiers();
+    }
 
     // Collect metrics during measurement phase
     if (!in_warmup) {

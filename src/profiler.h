@@ -97,6 +97,7 @@ private:
     static MetricStats compute_stats(const std::vector<double>& values);
     static MetricStats derive_fps_stats(const std::vector<double>& frame_ms_values);
     void build_scenarios();
+    void init_envelope_verifiers();
     double run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
                                       uint32_t raw_samples, DecimationMode dec_mode,
                                       const std::vector<uint32_t>* per_ch_raw);
@@ -117,4 +118,5 @@ private:
 
     DataGenerator* data_gen_ = nullptr;
     std::vector<EnvelopeVerifier> envelope_verifiers_;
+    bool envelope_verifiers_initialized_ = false;
 };

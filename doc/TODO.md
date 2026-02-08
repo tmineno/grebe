@@ -132,7 +132,7 @@
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
 | 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
-| 波形整合性 高精度計測 | **改善中** | Phase 11c: 理論 bucket サイズで高レート精度改善、Phase 11d: IPC モード envelope 検証 |
+| 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC モード envelope 検証 (未着手) |
 | E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
 
 ### Phase 11: 波形表示整合性検証（NFR-02b）
@@ -166,20 +166,20 @@
 **背景:**
 Phase 11b で build-once 最適化（verifier テーブルを初回フレームの実測 bucket size で 1 回だけ構築）を導入し、Windows 4ch 60 FPS を達成した。しかし初回フレームの実測 bucket size は定常状態と乖離するため、高レートで envelope 一致率が低下する（Linux 1ch×1G: 37%, 4ch×1G: 46%）。これは計測手法の限界であり、パイプラインのバグではない。
 
-**アプローチ:**
-- 実測値ベースではなく、理論バケットサイズ `bucket_size = sample_rate / target_fps / num_buckets` で verifier テーブルを事前構築する
-- profiler シナリオ開始時にパラメータが確定するため、初回フレーム到着前にテーブル構築可能
-- floor/ceil の 2 テーブル構築で整数除算の端数を吸収する
+**実装:**
+- Lazy-caching approach: `EnvelopeVerifier::set_period()` で周期バッファ参照を設定し、`verify()` に ch_raw を渡して bucket_size を算出、未キャッシュの bucket_size は on-demand で build
+- Per-bucket-size キャッシュ (`std::map<size_t, vector<uint32_t>>`) で同一 bucket_size は初回のみ build
+- Rate change 安定化のため warmup frame 10 以降に verifier を初期化
 
-- [ ] 理論バケットサイズ計算ロジック実装（`sample_rate / target_fps / num_buckets` の floor/ceil）
-- [ ] profiler シナリオ開始時に verifier テーブルを事前構築（初回フレーム依存を排除）
-- [ ] 計測実行: Embedded {1ch, 4ch} × {1M, 10M, 100M, 1G} SPS で envelope 100% 確認
-- [ ] TI-10 Phase 11c セクション追記
+- [x] Lazy-caching envelope verifier 実装（per-bucket-size on-demand build + cache）
+- [x] Profiler 統合: init_envelope_verifiers() + rate change settle
+- [x] 計測実行: Embedded {1ch, 4ch} × {1M, 10M, 100M, 1G} SPS で envelope 100% 確認
+- [x] TI-10 Phase 11c セクション追記
 
 **受入条件:**
-- Embedded 1ch × 全レート: envelope 一致率 100%
-- Embedded 4ch × 全レート: envelope 一致率 100%
-- Windows MSVC Release でも同等の結果
+- [x] Embedded 1ch × 全レート: envelope 一致率 100%
+- [x] Embedded 4ch × 全レート: envelope 一致率 100%
+- [ ] Windows MSVC Release でも同等の結果
 
 ### Phase 11d: IPC モード Envelope 検証
 

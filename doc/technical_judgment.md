@@ -950,6 +950,62 @@ Embedded 4ch:
 - **計測精度 vs 性能**: build-once は高レート・Windows 環境で envelope 一致率が低下するが、これは計測手法の制約であり品質劣化ではない。Linux ≤100 MSPS では build-once でも 100% を維持。
 - **NFR-02b 検証**: PoC としての波形表示整合性検証は完了。パイプラインは「速く、かつ正しい」。
 
+### 2026-02-08 Phase 11c: Lazy-caching envelope 検証 (R-16 完了)
+
+**背景**
+
+Phase 11b の build-once 最適化は、高レート・Windows 環境で envelope 一致率が低下する制約があった (1 GSPS: 37-46%、Windows ≥10 MSPS: 12-75%)。R-16 として理論 bucket サイズ構築による改善を計画。
+
+**技術的アプローチ**
+
+Phase 11b の build-once (シナリオ先頭で 1 回構築) ではなく、**lazy caching** (遅延構築 + 辞書キャッシュ) に移行:
+
+1. **Period buffer 参照**: `EnvelopeVerifier::set_period()` で周期バッファのポインタを設定。warmup 開始後の rate change 安定化を待って初期化 (frame 10 以降)。
+2. **Lazy build**: `verify()` に `ch_raw` を渡し、MinMax bucket boundary `floor(ch_raw / num_buckets)` と `floor(...) + 1` の 2 つの bucket サイズを算出。未キャッシュの bucket サイズは O(period_len) の sliding-window min/max で valid pair set を構築し、`std::map<size_t, vector<uint32_t>>` にキャッシュ。
+3. **Cache reuse**: 同一 bucket サイズは初回 build 後はキャッシュヒット。Embedded モードでは ch_raw の分布が数パターンに収束するため、measurement 300 frames 中の build 回数は < 10。
+
+**設計上の判断**:
+
+- **2x margin + union set (試行)**: warmup ch_raw の min/max に 2x マージンを適用し、全 integer bucket サイズの valid pair union を事前構築。1 GSPS period_len=333K × 300+ sizes で ~9 秒のビルドコスト → FPS stall で測定不能。
+- **Warmup-based sparse set (試行)**: warmup ch_raw から直接 bucket サイズを算出し、sparse set で構築。4ch×1GSPS の bimodal ch_raw 分布 ({65K, 197K}) でスパースセット間のギャップが measurement 時の中間値をカバーできず 97-99%。
+- **Lazy caching (採用)**: per-frame ではなく per-bucket-size の遅延構築。build コストは O(period_len)/entry で ~10ms、measurement 中に分散して発生。FPS stall なし、全 bucket サイズをカバー。
+
+**計測結果: WSL2 GCC Release, Ryzen 9 9950X3D**
+
+Embedded 1ch:
+
+| シナリオ | FPS avg | FPS min | Drops | Window Coverage | Envelope | Result |
+|---|---|---|---|---|---|---|
+| 1MSPS | 59.9 | 57.3 | 0 | 24.6% | **100.0%** | PASS |
+| 10MSPS | 60.4 | 45.0 | 0 | 2.5% | **100.0%** | PASS |
+| 100MSPS | 60.3 | 19.5 | 0 | 4.0% | **100.0%** | PASS |
+| 1GSPS | 59.3 | 19.7 | 0 | 1.0% | **100.0%** | PASS |
+
+Embedded 4ch:
+
+| シナリオ | FPS avg | FPS min | Drops | Window Coverage | Envelope | Result |
+|---|---|---|---|---|---|---|
+| 4ch×1MSPS | 59.9 | 52.7 | 0 | 98.2% | **100.0%** | PASS |
+| 4ch×10MSPS | 59.9 | 28.9 | 0 | 10.0% | **100.0%** | PASS |
+| 4ch×100MSPS | 58.8 | 6.8 | 0 | 16.0% | **100.0%** | PASS |
+| 4ch×1GSPS | 54.7 | 7.4 | 0 | 52.0% | **100.0%** | PASS |
+
+**Phase 11b → 11c 比較**
+
+| 指標 | Phase 11b (build-once) | Phase 11c (lazy caching) |
+|---|---|---|
+| 1ch×1GSPS envelope | 36.7% | **100.0%** |
+| 4ch×1GSPS envelope | 45.9% | **100.0%** |
+| Build stall (4ch×1GSPS) | 0 ms (build-once) | 0 ms (per-entry ~10ms, 分散) |
+| FPS impact (4ch×1GSPS) | 56.8 avg | 54.7 avg (±3%) |
+| Cache entries/scenario | 2 (floor/ceil) | ~4-10 (per bucket_size) |
+
+**結論 (更新)**:
+
+- **R-16 完了**: Lazy-caching envelope verifier により、**全 8 シナリオ (1ch/4ch × 4 レート) で envelope 100%** を性能劣化なしで達成。Phase 11b の build-once 制約を完全に解消。
+- **パイプラインの正確性**: 3 段階 (Phase 11 per-frame → Phase 11b build-once → Phase 11c lazy-caching) を通じて、MinMax パイプラインの正確性が一貫して証明された。
+- **NFR-02b 検証**: 波形表示整合性検証の PoC 目標を全面的に達成。
+
 ### IPC モードの波形整合性ボトルネック分析
 
 **現状**: IPC モードでは envelope 検証がスキップ (`match_rate = -1.0`) されている。grebe プロセスに `DataGenerator` が存在しないため、検証に必要な period buffer を参照できない。
@@ -1001,5 +1057,5 @@ Embedded 4ch:
 | ~~R-13~~ | ~~Release ビルドでの計測標準化~~ | ~~高~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト~~ |
 | R-14 | SG-side drop 緩和策 (バックプレッシャ or pre-decimation) | 低 | PoC 許容 | — | TI-09: SG drops は可視化品質に影響なし。製品化フェーズで施策 B+F を検討 |
 | ~~R-15~~ | ~~波形表示整合性検証 (envelope verification)~~ | ~~高~~ | ~~完了~~ | ~~Phase 11~~ | ~~TI-10: Embedded 1ch/4ch × 全レートで envelope 100%。NFR-02b 検証完了~~ |
-| R-16 | Envelope verifier の理論 bucket サイズ構築 | 中 | 未着手 | Phase 11c | TI-10 Phase 11b: build-once 最適化で高レート・Windows 環境の計測精度が低下。理論値ベースのテーブル構築で改善可能 |
+| ~~R-16~~ | ~~Envelope verifier の理論 bucket サイズ構築~~ | ~~中~~ | ~~完了~~ | ~~Phase 11c~~ | ~~TI-10 Phase 11c: lazy-caching で全シナリオ envelope 100% 達成。build-once の制約を完全解消~~ |
 | R-17 | IPC モード envelope 検証 | 中 | 未着手 | Phase 11d | TI-10: period buffer 再構築 (SignalConfigV2 ベース) + drop なしレート (≤100 MSPS) で 100% 目標、高レートは閾値定義 |

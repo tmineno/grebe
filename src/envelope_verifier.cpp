@@ -67,46 +67,53 @@ void EnvelopeVerifier::build_window_set(const int16_t* period_buf, size_t period
     out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
-void EnvelopeVerifier::rebuild(const int16_t* period_buf, size_t period_len,
-                                size_t bucket_size_floor, size_t bucket_size_ceil) {
-    ready_ = false;
-    win_floor_ = bucket_size_floor;
-    win_ceil_ = bucket_size_ceil;
+void EnvelopeVerifier::set_period(const int16_t* period_buf, size_t period_len) {
+    period_buf_ = period_buf;
+    period_len_ = period_len;
+    cache_.clear();
+}
 
-    build_window_set(period_buf, period_len, bucket_size_floor, set_floor_);
+void EnvelopeVerifier::clear() {
+    period_buf_ = nullptr;
+    period_len_ = 0;
+    cache_.clear();
+}
 
-    if (bucket_size_ceil != bucket_size_floor) {
-        build_window_set(period_buf, period_len, bucket_size_ceil, set_ceil_);
-    } else {
-        set_ceil_ = set_floor_;
+void EnvelopeVerifier::ensure_bucket_sizes(size_t bs1, size_t bs2) {
+    std::vector<uint32_t> temp;
+    for (size_t bs : {bs1, bs2}) {
+        if (bs == 0 || cache_.count(bs)) continue;
+        build_window_set(period_buf_, period_len_, bs, temp);
+        cache_[bs] = std::move(temp);
     }
-
-    ready_ = true;
 }
 
 EnvelopeResult EnvelopeVerifier::verify(const int16_t* decimated, uint32_t num_buckets,
-                                          size_t raw_sample_count) const {
+                                          uint32_t ch_raw) {
     EnvelopeResult result;
     result.total_buckets = num_buckets;
     result.matched_buckets = 0;
 
-    if (!ready_ || num_buckets == 0 || raw_sample_count == 0) {
+    if (!is_ready() || num_buckets == 0 || ch_raw == 0) {
         result.match_rate = -1.0;
         return result;
     }
 
-    size_t N = raw_sample_count;
-    uint32_t B = num_buckets;
+    // MinMax bucket boundaries: start = b * ch_raw / num_buckets
+    // Bucket sizes are floor(ch_raw / num_buckets) and floor(ch_raw / num_buckets) + 1
+    size_t base_bs = static_cast<size_t>(ch_raw) / num_buckets;
+    if (base_bs == 0) base_bs = 1;
+    size_t alt_bs = base_bs + 1;
 
-    for (uint32_t b = 0; b < B; b++) {
-        size_t bstart = (static_cast<size_t>(b) * N) / B;
-        size_t bend   = (static_cast<size_t>(b + 1) * N) / B;
-        size_t bsz = bend - bstart;
+    // Lazily build and cache window sets for these bucket sizes
+    ensure_bucket_sizes(base_bs, alt_bs);
 
+    const auto& set1 = cache_[base_bs];
+    const auto& set2 = cache_[alt_bs];
+
+    for (uint32_t b = 0; b < num_buckets; b++) {
         int16_t lo = decimated[b * 2];
         int16_t hi = decimated[b * 2 + 1];
-
-        const auto& valid_set = (bsz > win_floor_) ? set_ceil_ : set_floor_;
 
         // Check with +/-1 LSB tolerance (9 neighbor combinations)
         bool matched = false;
@@ -116,9 +123,10 @@ EnvelopeResult EnvelopeVerifier::verify(const int16_t* decimated, uint32_t num_b
                 int thi = static_cast<int>(hi) + dh;
                 if (tlo < -32768 || tlo > 32767) continue;
                 if (thi < -32768 || thi > 32767) continue;
-                if (std::binary_search(valid_set.begin(), valid_set.end(),
-                                       pack_pair(static_cast<int16_t>(tlo),
-                                                 static_cast<int16_t>(thi)))) {
+                uint32_t packed = pack_pair(static_cast<int16_t>(tlo),
+                                            static_cast<int16_t>(thi));
+                if (std::binary_search(set1.begin(), set1.end(), packed) ||
+                    std::binary_search(set2.begin(), set2.end(), packed)) {
                     matched = true;
                 }
             }
