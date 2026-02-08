@@ -1,11 +1,15 @@
 #pragma once
 
+#include "decimator.h"
+#include "envelope_verifier.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
 
 class AppCommandQueue;
 class Benchmark;
+class DataGenerator;
 
 struct FrameSample {
     double frame_time_ms  = 0.0;
@@ -19,6 +23,8 @@ struct FrameSample {
     double decimate_ratio = 1.0;
     double data_rate      = 0.0;
     double ring_fill      = 0.0;
+    double window_coverage = 0.0;       // raw_samples / expected_samples_per_frame
+    double envelope_match_rate = -1.0;  // -1.0 = skipped
 };
 
 struct MetricStats {
@@ -51,8 +57,11 @@ struct ScenarioResult {
     MetricStats vertex_count;
     MetricStats data_rate;
     MetricStats ring_fill;
+    MetricStats window_coverage;
+    MetricStats envelope_match_rate;  // excludes skipped frames (-1)
     uint64_t drop_total = 0;     // net viewer-side drops during measurement phase
     uint64_t sg_drop_total = 0;  // SG-side drops at end of measurement phase
+    uint64_t seq_gaps = 0;       // IPC sequence gaps during measurement phase
     bool pass = false;
 };
 
@@ -70,9 +79,15 @@ public:
     void on_frame(const Benchmark& bench, uint32_t vertex_count,
                   double data_rate, double ring_fill,
                   uint64_t total_drops, uint64_t sg_drops,
-                  AppCommandQueue& cmd_queue);
+                  uint64_t seq_gaps, uint32_t raw_samples,
+                  AppCommandQueue& cmd_queue,
+                  const int16_t* frame_data = nullptr,
+                  uint32_t per_ch_vtx = 0,
+                  DecimationMode dec_mode = DecimationMode::MinMax,
+                  const std::vector<uint32_t>* per_ch_raw = nullptr);
 
     void set_channel_count(uint32_t n) { channel_count_ = n; }
+    void set_data_generator(DataGenerator* gen) { data_gen_ = gen; }
 
     // Generate report to stdout + JSON file.
     // Returns exit code: 0 = all pass, 1 = any fail.
@@ -81,6 +96,9 @@ public:
 private:
     static MetricStats compute_stats(const std::vector<double>& values);
     void build_scenarios();
+    double run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
+                                      uint32_t raw_samples, DecimationMode dec_mode,
+                                      const std::vector<uint32_t>* per_ch_raw);
 
     std::vector<ScenarioConfig> scenarios_;
     std::vector<ScenarioResult> results_;
@@ -94,4 +112,8 @@ private:
     uint32_t channel_count_ = 1;
     uint64_t drops_at_start_ = 0;     // snapshot at scenario start
     uint64_t sg_drops_at_start_ = 0;  // snapshot at scenario start (SG-side)
+    uint64_t seq_gaps_at_start_ = 0;  // snapshot at scenario start (IPC seq gaps)
+
+    DataGenerator* data_gen_ = nullptr;
+    std::vector<EnvelopeVerifier> envelope_verifiers_;
 };

@@ -98,6 +98,7 @@ void DecimationThread::stop() {
     workers_.clear();
     start_barrier_.reset();
     done_barrier_.reset();
+    workers_exit_.store(false, std::memory_order_relaxed);
     num_workers_ = 0;
     running_.store(false, std::memory_order_relaxed);
     spdlog::info("DecimationThread stopped");
@@ -134,6 +135,18 @@ bool DecimationThread::try_get_frame(std::vector<int16_t>& output, uint32_t& raw
 
     output.swap(front_buffer_);
     raw_sample_count = front_raw_count_;
+    new_data_ = false;
+    return true;
+}
+
+bool DecimationThread::try_get_frame(std::vector<int16_t>& output, uint32_t& raw_sample_count,
+                                      std::vector<uint32_t>& per_ch_raw_out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!new_data_) return false;
+
+    output.swap(front_buffer_);
+    raw_sample_count = front_raw_count_;
+    per_ch_raw_out = front_per_ch_raw_;
     new_data_ = false;
     return true;
 }
@@ -177,13 +190,15 @@ void DecimationThread::thread_func_single() {
         // Drain all channels
         uint32_t total_raw = 0;
         double max_fill = 0.0;
+        std::vector<uint32_t> per_ch_raw(num_ch, 0);
         for (uint32_t ch = 0; ch < num_ch; ch++) {
             size_t avail = rings_[ch]->size();
             if (avail > 0) {
                 drain_bufs[ch].resize(avail);
                 size_t popped = rings_[ch]->pop_bulk(drain_bufs[ch].data(), avail);
                 drain_bufs[ch].resize(popped);
-                total_raw += static_cast<uint32_t>(popped);
+                per_ch_raw[ch] = static_cast<uint32_t>(popped);
+                total_raw += per_ch_raw[ch];
             } else {
                 drain_bufs[ch].clear();
             }
@@ -236,6 +251,7 @@ void DecimationThread::thread_func_single() {
             std::lock_guard<std::mutex> lock(mutex_);
             front_buffer_.swap(concatenated);
             front_raw_count_ = total_raw;
+            front_per_ch_raw_ = std::move(per_ch_raw);
             new_data_ = true;
         }
     }
@@ -270,6 +286,7 @@ void DecimationThread::thread_func_multi() {
         // Gather results: concatenate in channel order [ch0 | ch1 | ... | chN-1]
         std::vector<int16_t> concatenated;
         uint32_t total_raw = 0;
+        std::vector<uint32_t> per_ch_raw(num_ch, 0);
         double max_fill = 0.0;
         uint32_t per_ch_vtx = 0;
         auto target = target_points_.load(std::memory_order_relaxed);
@@ -284,7 +301,8 @@ void DecimationThread::thread_func_multi() {
                 if (assigned[i] == ch) { slot = i; break; }
             }
 
-            total_raw += static_cast<uint32_t>(workers_[w].raw_counts[slot]);
+            per_ch_raw[ch] = static_cast<uint32_t>(workers_[w].raw_counts[slot]);
+            total_raw += per_ch_raw[ch];
 
             auto& dec = workers_[w].dec_results[slot];
             if (dec.empty()) {
@@ -313,14 +331,14 @@ void DecimationThread::thread_func_multi() {
             std::lock_guard<std::mutex> lock(mutex_);
             front_buffer_.swap(concatenated);
             front_raw_count_ = total_raw;
+            front_per_ch_raw_ = std::move(per_ch_raw);
             new_data_ = true;
         }
     }
 
-    // Release workers so they can exit
-    // Workers are waiting on start_barrier — arrive once more so they unblock and see stop_requested_
+    // Signal workers to exit, then release them via barriers
+    workers_exit_.store(true, std::memory_order_relaxed);
     start_barrier_->arrive_and_wait();
-    // Workers will arrive at done_barrier before exiting
     done_barrier_->arrive_and_wait();
 }
 
@@ -333,8 +351,11 @@ void DecimationThread::worker_func(uint32_t worker_id) {
         // Wait for coordinator to signal start
         start_barrier_->arrive_and_wait();
 
-        if (stop_requested_.load(std::memory_order_relaxed)) {
-            // Signal done before exiting so coordinator doesn't hang
+        // Only exit when coordinator explicitly sets workers_exit_ (after its while loop).
+        // Using stop_requested_ here would race: if stop is requested between the
+        // coordinator's while-loop check and its start_barrier arrival, workers would
+        // exit early, leaving the coordinator's shutdown barrier sequence deadlocked.
+        if (workers_exit_.load(std::memory_order_relaxed)) {
             done_barrier_->arrive_and_wait();
             break;
         }

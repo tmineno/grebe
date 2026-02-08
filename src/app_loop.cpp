@@ -187,7 +187,8 @@ void run_main_loop(AppComponents& app) {
         // Get decimated frame from decimation thread (timed as "drain")
         auto t0 = Benchmark::now();
         uint32_t raw_samples = 0;
-        bool has_new_data = app.dec_thread->try_get_frame(frame_data, raw_samples);
+        std::vector<uint32_t> per_ch_raw;
+        bool has_new_data = app.dec_thread->try_get_frame(frame_data, raw_samples, per_ch_raw);
         app.benchmark->set_drain_time(Benchmark::elapsed_ms(t0));
         app.benchmark->set_samples_per_frame(raw_samples);
         app.benchmark->set_decimation_time(app.dec_thread->decimation_time_ms());
@@ -238,6 +239,17 @@ void run_main_loop(AppComponents& app) {
 
         // Build ImGui frame
         app.hud->new_frame();
+        // Sequence gaps (IPC mode only)
+        uint64_t seq_gaps = app.seq_gaps.load(std::memory_order_relaxed);
+
+        // Window coverage: raw_samples / expected_samples_per_frame
+        double window_coverage = 0.0;
+        {
+            double frame_ms = app.benchmark->frame_time_ms();
+            double expected = (frame_ms > 0.0) ? (data_rate * frame_ms / 1000.0) : 0.0;
+            window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
+        }
+
         app.hud->build_status_bar(*app.benchmark, data_rate,
                                   app.dec_thread->ring_fill_ratio(),
                                   app.buf_mgr->vertex_count(),
@@ -245,7 +257,9 @@ void run_main_loop(AppComponents& app) {
                                   app.dec_thread->effective_mode(),
                                   app.num_channels,
                                   total_drops,
-                                  sg_drops);
+                                  sg_drops,
+                                  seq_gaps,
+                                  window_coverage);
 
         // Render (timed)
         t0 = Benchmark::now();
@@ -273,7 +287,12 @@ void run_main_loop(AppComponents& app) {
                                    data_rate,
                                    app.dec_thread->ring_fill_ratio(),
                                    total_drops, sg_drops,
-                                   *app.cmd_queue);
+                                   seq_gaps, raw_samples,
+                                   *app.cmd_queue,
+                                   frame_data.empty() ? nullptr : frame_data.data(),
+                                   app.dec_thread->per_channel_vertex_count(),
+                                   app.dec_thread->effective_mode(),
+                                   per_ch_raw.empty() ? nullptr : &per_ch_raw);
         }
 
         // Update window title with FPS (throttled to 4 Hz)

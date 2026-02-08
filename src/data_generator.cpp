@@ -246,10 +246,12 @@ void DataGenerator::thread_func() {
             }
         }
 
-        bool use_tiling = high_rate && !any_chirp;
+        // Use period tiling for all periodic waveforms (not just high-rate).
+        // This ensures exact periodicity for envelope verification at all rates.
+        bool use_tiling = !any_chirp;
 
-        if (use_tiling) {
-            // Rebuild period buffer if parameters changed
+        // Maintain period buffer for tiling and envelope verification
+        {
             bool need_rebuild = (sample_rate != cached_sample_rate_ || frequency != cached_frequency_);
             if (!need_rebuild) {
                 for (size_t ch = 0; ch < num_channels; ch++) {
@@ -262,7 +264,9 @@ void DataGenerator::thread_func() {
             if (need_rebuild) {
                 rebuild_period_buffer(sample_rate, frequency);
             }
+        }
 
+        if (use_tiling) {
             // Fill batch by tiling per-channel period buffer
             for (size_t ch = 0; ch < num_channels; ch++) {
                 auto& cs = channel_states_[ch];

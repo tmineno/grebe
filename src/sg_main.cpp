@@ -75,6 +75,7 @@ static void sender_thread_func(
     std::vector<int16_t> payload(MAX_BLOCK * num_channels);
     std::vector<int16_t> channel_buf(MAX_BLOCK);
     uint64_t sequence = 0;
+    uint64_t total_samples_sent = 0;  // per-channel cumulative sample index
 
     while (!stop_requested.load(std::memory_order_relaxed)) {
         uint32_t block_size = block_size_ref.load(std::memory_order_relaxed);
@@ -119,6 +120,8 @@ static void sender_thread_func(
             sg_drops += dc->total_dropped();
         }
         header.sg_drops_total = sg_drops;
+        header.first_sample_index = total_samples_sent;
+        total_samples_sent += block_size;
 
         if (!producer.send_frame(header, payload.data())) {
             spdlog::info("grebe-sg: pipe closed, stopping sender");

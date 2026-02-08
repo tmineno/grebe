@@ -37,17 +37,28 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
                                std::atomic<bool>& stop,
                                std::atomic<double>& sample_rate_out,
                                std::atomic<uint64_t>& sg_drops_out,
+                               std::atomic<uint64_t>& seq_gaps_out,
                                DecimationThread& dec_thread,
                                std::vector<DropCounter*>& drop_counters) {
     FrameHeaderV2 hdr{};
     std::vector<int16_t> payload;
     double last_rate = 0.0;
+    uint64_t expected_seq = 0;
+    uint64_t gap_count = 0;
 
     while (!stop.load(std::memory_order_relaxed)) {
         if (!consumer.receive_frame(hdr, payload)) {
             spdlog::info("IPC receiver: pipe closed");
             break;
         }
+
+        // Sequence continuity check
+        if (hdr.sequence != expected_seq && expected_seq > 0) {
+            uint64_t gap = (hdr.sequence > expected_seq) ? (hdr.sequence - expected_seq) : 1;
+            gap_count += gap;
+            seq_gaps_out.store(gap_count, std::memory_order_relaxed);
+        }
+        expected_seq = hdr.sequence + 1;
 
         // Sync sample rate from grebe-sg
         if (hdr.sample_rate_hz > 0.0 && hdr.sample_rate_hz != last_rate) {
@@ -227,6 +238,7 @@ int main(int argc, char* argv[]) {
 
         ProfileRunner profiler;
         profiler.set_channel_count(opts.num_channels);
+        profiler.set_data_generator(data_gen.get());  // nullptr in IPC mode
         if (opts.enable_profile) {
             spdlog::info("Profile mode enabled");
             if (!benchmark.is_logging()) {
@@ -271,6 +283,7 @@ int main(int argc, char* argv[]) {
                                               std::ref(ipc_receiver_stop),
                                               std::ref(app.current_sample_rate),
                                               std::ref(app.sg_drops_total),
+                                              std::ref(app.seq_gaps),
                                               std::ref(dec_thread),
                                               std::ref(drop_ptrs));
         }
@@ -278,14 +291,15 @@ int main(int argc, char* argv[]) {
         run_main_loop(app);
 
         // =====================================================================
-        // Cleanup
+        // Cleanup (stop producer before consumer to allow clean drain)
         // =====================================================================
         benchmark.stop_logging();
-        dec_thread.stop();
 
         if (data_gen) {
             data_gen->stop();
         }
+
+        dec_thread.stop();
 
         // Stop IPC receiver
         ipc_receiver_stop.store(true, std::memory_order_relaxed);

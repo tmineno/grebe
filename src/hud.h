@@ -30,7 +30,9 @@ public:
                           DecimationMode dec_mode = DecimationMode::None,
                           uint32_t channel_count = 1,
                           uint64_t total_drops = 0,
-                          uint64_t sg_drops = 0);
+                          uint64_t sg_drops = 0,
+                          uint64_t seq_gaps = 0,
+                          double window_coverage = 0.0);
 
     // Call inside the active render pass
     void render(VkCommandBuffer cmd);

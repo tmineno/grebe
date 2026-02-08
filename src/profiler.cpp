@@ -1,11 +1,13 @@
 #include "profiler.h"
 #include "app_command.h"
 #include "benchmark.h"
+#include "data_generator.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -32,10 +34,74 @@ bool ProfileRunner::should_continue() const {
     return !finished_;
 }
 
+double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
+                                                  uint32_t raw_samples, DecimationMode dec_mode,
+                                                  const std::vector<uint32_t>* per_ch_raw) {
+    // Only verify MinMax mode with periodic waveforms and embedded DataGenerator
+    if (!data_gen_ || dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
+        return -1.0;
+    }
+
+    uint32_t num_buckets = per_ch_vtx / 2;
+    if (num_buckets == 0) return -1.0;
+
+    // Ensure verifiers vector is sized for channel_count
+    if (envelope_verifiers_.size() != channel_count_) {
+        envelope_verifiers_.resize(channel_count_);
+    }
+
+    double total_match = 0.0;
+    uint32_t verified_channels = 0;
+
+    for (uint32_t ch = 0; ch < channel_count_; ch++) {
+        // Use per-channel raw count if available, else fallback to average
+        uint32_t ch_raw = (per_ch_raw && ch < per_ch_raw->size())
+            ? (*per_ch_raw)[ch]
+            : (raw_samples / channel_count_);
+        if (ch_raw == 0) continue;
+
+        // Skip non-periodic waveforms
+        WaveformType wf = data_gen_->get_channel_waveform(ch);
+        if (wf == WaveformType::WhiteNoise || wf == WaveformType::Chirp) {
+            continue;
+        }
+
+        const int16_t* period_buf = data_gen_->period_buffer_ptr(ch);
+        size_t period_len = data_gen_->period_length(ch);
+        if (!period_buf || period_len == 0) continue;
+
+        // Rebuild verifier tables if bucket dimensions changed
+        size_t floor_bs = static_cast<size_t>(ch_raw) / num_buckets;
+        size_t ceil_bs = (static_cast<size_t>(ch_raw) + num_buckets - 1) / num_buckets;
+
+        auto& verifier = envelope_verifiers_[ch];
+        if (floor_bs != verifier.win_floor() || ceil_bs != verifier.win_ceil() || !verifier.is_ready()) {
+            verifier.rebuild(period_buf, period_len, floor_bs, ceil_bs);
+        }
+
+        // Verify this channel's decimated output
+        const int16_t* ch_decimated = frame_data + static_cast<size_t>(ch) * per_ch_vtx;
+        EnvelopeResult er = verifier.verify(ch_decimated, num_buckets, ch_raw);
+
+        if (er.match_rate >= 0.0) {
+            total_match += er.match_rate;
+            verified_channels++;
+        }
+    }
+
+    if (verified_channels == 0) return -1.0;
+    return total_match / static_cast<double>(verified_channels);
+}
+
 void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              double data_rate, double ring_fill,
                              uint64_t total_drops, uint64_t sg_drops,
-                             AppCommandQueue& cmd_queue) {
+                             uint64_t seq_gaps, uint32_t raw_samples,
+                             AppCommandQueue& cmd_queue,
+                             const int16_t* frame_data,
+                             uint32_t per_ch_vtx,
+                             DecimationMode dec_mode,
+                             const std::vector<uint32_t>* per_ch_raw) {
     if (finished_) return;
 
     build_scenarios();
@@ -50,6 +116,9 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         current_samples_.reserve(scenario.measure_frames);
         drops_at_start_ = total_drops;
         sg_drops_at_start_ = sg_drops;
+        seq_gaps_at_start_ = seq_gaps;
+        // Reset envelope verifiers for new scenario (bucket sizes will change)
+        envelope_verifiers_.clear();
         cmd_queue.push(CmdSetSampleRate{scenario.sample_rate});
         spdlog::info("[profile] Starting scenario '{}' (rate={:.0f}, warmup={}, measure={})",
                      scenario.name, scenario.sample_rate,
@@ -73,6 +142,18 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         sample.decimate_ratio = bench.decimation_ratio();
         sample.data_rate     = data_rate;
         sample.ring_fill     = ring_fill;
+
+        // Window coverage: raw_samples / expected_samples_per_frame
+        double frame_ms = bench.frame_time_ms();
+        double expected = (frame_ms > 0.0) ? (scenario.sample_rate * frame_ms / 1000.0) : 0.0;
+        sample.window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
+
+        // Envelope verification
+        if (frame_data && per_ch_vtx > 0) {
+            sample.envelope_match_rate = run_envelope_verification(
+                frame_data, per_ch_vtx, raw_samples, dec_mode, per_ch_raw);
+        }
+
         current_samples_.push_back(sample);
     }
 
@@ -86,7 +167,8 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
 
         // Extract per-metric vectors and compute stats
         std::vector<double> v_frame, v_drain, v_dec, v_upload, v_swap, v_render;
-        std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_fps;
+        std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_fps, v_coverage;
+        std::vector<double> v_envelope;
 
         for (const auto& s : current_samples_) {
             v_frame.push_back(s.frame_time_ms);
@@ -100,6 +182,10 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
             v_rate.push_back(s.data_rate);
             v_ring.push_back(s.ring_fill);
             v_fps.push_back(s.frame_time_ms > 0.0 ? 1000.0 / s.frame_time_ms : 0.0);
+            v_coverage.push_back(s.window_coverage);
+            if (s.envelope_match_rate >= 0.0) {
+                v_envelope.push_back(s.envelope_match_rate);
+            }
         }
 
         result.fps               = compute_stats(v_fps);
@@ -113,14 +199,19 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         result.vertex_count      = compute_stats(v_vtx);
         result.data_rate         = compute_stats(v_rate);
         result.ring_fill         = compute_stats(v_ring);
+        result.window_coverage   = compute_stats(v_coverage);
+        result.envelope_match_rate = compute_stats(v_envelope);
 
         result.drop_total = total_drops - drops_at_start_;
         result.sg_drop_total = sg_drops - sg_drops_at_start_;
+        result.seq_gaps = seq_gaps - seq_gaps_at_start_;
         result.pass = result.fps.avg >= scenario.min_fps_threshold;
 
-        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} drops={} sg_drops={} → {}",
+        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} drops={} gaps={} coverage={:.1f}% envelope={:.1f}% \xe2\x86\x92 {}",
                      scenario.name, result.fps.avg, result.fps.min, result.fps.max,
-                     result.drop_total, result.sg_drop_total,
+                     result.drop_total, result.seq_gaps,
+                     result.window_coverage.avg * 100.0,
+                     v_envelope.empty() ? -1.0 : result.envelope_match_rate.avg * 100.0,
                      result.pass ? "PASS" : "FAIL");
 
         results_.push_back(result);
@@ -175,23 +266,26 @@ int ProfileRunner::generate_report() const {
 
     // Stdout report
     spdlog::info("========== PROFILE REPORT ==========");
-    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}",
+    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8}",
                  "Scenario", "FPS avg", "FPS min", "FPS p95",
-                 "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Drops", "SG Drops", "Result");
-    spdlog::info("{}", std::string(120, '-'));
+                 "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Drops",
+                 "WinCov%", "Env%", "Result");
+    spdlog::info("{}", std::string(132, '-'));
 
     for (const auto& r : results_) {
-        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>10} {:>8}",
+        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>7.1f}% {:>7.1f}% {:>8}",
                      r.config.name,
                      r.fps.avg, r.fps.min, r.fps.p95,
                      r.frame_ms.avg, r.render_ms.avg,
                      r.vertex_count.avg, r.samples_per_frame.avg,
-                     r.drop_total, r.sg_drop_total,
+                     r.drop_total,
+                     r.window_coverage.avg * 100.0,
+                     r.envelope_match_rate.avg * 100.0,
                      r.pass ? "PASS" : "FAIL");
         if (!r.pass) overall_pass = false;
     }
 
-    spdlog::info("{}", std::string(100, '='));
+    spdlog::info("{}", std::string(132, '='));
     spdlog::info("Overall: {}", overall_pass ? "PASS" : "FAIL");
 
     // JSON report
@@ -221,9 +315,12 @@ int ProfileRunner::generate_report() const {
             {"vertex_count",      stats_to_json(r.vertex_count)},
             {"data_rate",         stats_to_json(r.data_rate)},
             {"ring_fill",         stats_to_json(r.ring_fill)},
+            {"window_coverage",   stats_to_json(r.window_coverage)},
+            {"envelope_match_rate", stats_to_json(r.envelope_match_rate)},
         };
         s["drop_total"] = r.drop_total;
         s["sg_drop_total"] = r.sg_drop_total;
+        s["seq_gaps"] = r.seq_gaps;
         s["pass"] = r.pass;
         scenarios_json.push_back(s);
     }

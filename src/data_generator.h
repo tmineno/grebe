@@ -52,6 +52,17 @@ public:
 
     void set_drop_counters(std::vector<DropCounter*> counters);
 
+    // Read-only access to period buffer (safe during profiling measurement phase
+    // when sample rate is stable and period buffer is not being rebuilt).
+    const int16_t* period_buffer_ptr(uint32_t ch) const {
+        if (ch < channel_states_.size()) return channel_states_[ch].period_buf.data();
+        return nullptr;
+    }
+    size_t period_length(uint32_t ch) const {
+        if (ch < channel_states_.size()) return channel_states_[ch].period_len;
+        return 0;
+    }
+
     static constexpr uint32_t MAX_CHANNELS = 8;
 
 private:

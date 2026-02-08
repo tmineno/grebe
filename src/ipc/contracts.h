@@ -22,6 +22,7 @@ struct FrameHeaderV2 {
     uint32_t header_crc32c      = 0;    // placeholder for Phase 8; real CRC in Phase 10
     double   sample_rate_hz     = 0.0;  // current sample rate (grebe-sg authoritative)
     uint64_t sg_drops_total     = 0;    // cumulative SG-side ring buffer drops
+    uint64_t first_sample_index = 0;    // absolute sample index of first sample (per channel)
 };
 
 // =========================================================================

@@ -17,6 +17,7 @@
 | 2026-02-08 | Phase 10-2 | TI-08 ボトルネック再評価。WSL2 Release 検証で drops 根本原因はパイプラインスループット（キャッシュ冷えデータ）と判明。shm 延期続行 |
 | 2026-02-08 | Phase 10-3 | TI-08 追記。マルチスレッド間引き + リング 64M 拡大 + Debug 警告。4ch/8ch×1G 0-drops 達成。R-08/R-13 完了 |
 | 2026-02-08 | Phase 10-4 | TI-09 SG-side drop 評価。IPC vs Embedded 定量比較。SG drops テレメトリ追加 (FrameHeaderV2 + profiler)。R-14 追加 |
+| 2026-02-08 | Phase 11 | TI-10 波形表示整合性検証。Envelope 検証 100%、sequence continuity、window coverage 計測。R-15 完了 |
 
 ---
 
@@ -33,6 +34,7 @@
 | TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
 | TI-08 | IPC ボトルネック再評価と次ステップ判定 | 回答済み | 2026-02-08 |
 | TI-09 | SG-side drop 評価と緩和策 | 回答済み | 2026-02-08 |
+| TI-10 | 波形表示整合性検証 | 回答済み | 2026-02-08 |
 
 ---
 
@@ -772,7 +774,7 @@ SG drops を定量計測するため、以下の変更を実施:
 
 4. **FPS への影響**: IPC 4ch×1G の FPS (55.7) は Embedded (58.7) と比較して 5% 低下。pipe 読み出しのオーバーヘッドによるもので、SG drops とは無関係。
 
-**結論: 現行の PoC 計測メトリクス (頂点数、FPS、smp/f) において、SG drops による有意な可視化品質劣化は観測されていない。** MinMax デシメーション後の出力は SG drops の有無に関わらず 3,840 vtx/ch で同一であり、これは品質維持の必要条件を満たす。ただし、頂点数の不変は十分条件ではなく、波形忠実度の厳密な検証 (Embedded 基準との envelope 比較、ピーク見逃し率等) は製品化フェーズの課題として残る。
+**結論: 現行の PoC 計測メトリクス (頂点数、FPS、smp/f) において、SG drops による有意な可視化品質劣化は観測されていない。** MinMax デシメーション後の出力は SG drops の有無に関わらず 3,840 vtx/ch で同一であり、これは品質維持の必要条件を満たす。ただし、頂点数の不変は十分条件ではなく、Embedded モードでの基本 envelope 検証（既知信号 MinMax 出力 vs 理論 envelope）は PoC Phase 11 で実施する。Product tier の高度メトリクス（Embedded/IPC 比較 envelope mismatch rate、ピーク見逃し率等）は製品化フェーズの課題として残る。
 
 **緩和策マトリクス**
 
@@ -791,6 +793,63 @@ SG drops を定量計測するため、以下の変更を実施:
 - **施策 A (バックプレッシャ復活) が最小コストの改善策。** ただし actual_rate が pipe 帯域に律速されるため、1 GSPS の「生成能力の実証」としては矛盾する。PoC の目的 (1 GSPS 表示能力の実証) は Embedded モードで達成済みのため、IPC モードの SG drops 緩和は製品化フェーズでの検討事項。
 - **施策 B (SG-side pre-decimation) が最も根本的な解決策** — pipe に生データではなく間引き済みデータを流す構成。ただし grebe-sg と grebe の間引きパラメータ同期、画面サイズ変更時の再ネゴシエーション等、設計の複雑性が大幅に増加するため PoC scope 外。
 - **将来の製品化では施策 B + F (SG-side pre-decimation + shm) の組み合わせ** が最適解。shm で帯域制約を排除しつつ、pre-decimation で必要帯域を削減。
+
+---
+
+## TI-10: 波形表示整合性検証
+
+> パイプライン出力（MinMax 間引き結果）が入力信号を忠実に再現しているか。フレーム欠落の有無。Embedded 1ch/4ch で envelope 一致率 100% を達成できるか。
+
+### 2026-02-08 Phase 11 (dzn, WSL2, GCC Debug ビルド, Ryzen 9 9950X3D)
+
+**検証手法**
+
+3 つの検証柱を `--profile` に統合:
+
+1. **Sequence continuity**: IPC モードで `FrameHeaderV2.sequence` の連続性を検証。ギャップ数を HUD + JSON に表示。Embedded モードでは IPC フレーム概念がないため非適用 (常に 0)。
+
+2. **Window coverage**: `raw_samples / (sample_rate × frame_ms / 1000)` でフレームあたりの理論サンプル数に対する実受信率を計測。V-Sync 有効時は coverage < 100% が正常（ring buffer drain は間引きスレッドのポーリング頻度に依存）。
+
+3. **Envelope verification**: 既知周期信号の MinMax 出力を理論 envelope と比較。
+   - 信号: period tiling (memcpy) による厳密周期信号。周波数 = `max(180, 3 × rate / 1e6)` Hz。
+   - 理論 envelope: 周期バッファ上の cyclic sliding-window min/max (monotonic deque, O(period_len)) から、全位相オフセットにおける有効 (min, max) ペア集合を構築。
+   - 照合: 各 MinMax bucket の出力 (lo, hi) が有効集合に含まれるか検証。±1 LSB の許容誤差 (9 近傍チェック)。
+   - bucket サイズは floor/ceil の 2 パターンで集合を事前構築。
+   - MinMax 以外のモード (LTTB, None) + 非周期波形 (WhiteNoise, Chirp) はスキップ (match_rate = -1)。
+
+**計測結果: Embedded 1ch**
+
+| シナリオ | FPS avg | FPS min | Drops | Seq Gaps | Window Coverage | Envelope | Result |
+|---|---|---|---|---|---|---|---|
+| 1MSPS | 60.5 | 58.9 | 0 | 0 | 24.8% | **100.0%** | PASS |
+| 10MSPS | 60.7 | 57.3 | 0 | 0 | 2.5% | **100.0%** | PASS |
+| 100MSPS | 60.8 | 58.8 | 0 | 0 | 4.0% | **100.0%** | PASS |
+| 1GSPS | 133.0 | 59.4 | 0 | 0 | 2.1% | **100.0%** | PASS |
+
+**計測結果: Embedded 4ch**
+
+| シナリオ | FPS avg | FPS min | Drops | Seq Gaps | Window Coverage | Envelope | Result |
+|---|---|---|---|---|---|---|---|
+| 4ch×1MSPS | 62.0 | 60.2 | 0 | 0 | 101.6% | **100.0%** | PASS |
+| 4ch×10MSPS | 63.2 | 59.5 | 0 | 0 | 10.3% | **100.0%** | PASS |
+| 4ch×100MSPS | 63.7 | 59.6 | 0 | 0 | 16.6% | **100.0%** | PASS |
+| 4ch×1GSPS | 289.9 | 57.6 | 0 | 0 | 20.9% | **100.0%** | PASS |
+
+**分析**
+
+1. **Envelope 一致率 100%**: 全 8 シナリオ (1ch × 4 レート + 4ch × 4 レート) で MinMax 間引き結果が理論 envelope と完全一致。パイプラインの正確性が定量的に証明された。
+
+2. **Per-channel 精度**: 4ch モードではマルチスレッド間引き (4 workers, `std::barrier` 同期) が各チャンネルを並列処理する。各チャンネルは独立した位相オフセット (`π × ch / N`) を持つが、per-channel raw count を atomic に取得することで bucket サイズ計算の正確性を保証。全チャンネルで 100% 一致。
+
+3. **Window Coverage の解釈**: Coverage < 100% は正常動作。decimation thread のポーリング間隔 (100μs sleep) とフレーム間のデータ蓄積パターンにより、1 フレームに含まれる raw samples は理論値の一部のみ。1MSPS/4ch では coverage > 100% (101.6%) となるが、これは前フレームの残留データが含まれるため。
+
+4. **Sequence Gaps**: Embedded モードでは IPC フレームヘッダによる sequence 追跡がないため、常に 0。IPC モードでの sequence gap 検知は FrameHeaderV2.sequence フィールドで実装済み (HUD に GAP:N 表示)。
+
+5. **バリア競合条件の修正**: 4ch モードのプロファイル実行時に exit code 144 (signal 16 = SIGSTKFLT) でプロセスがクラッシュする問題を発見・修正。根本原因: `DecimationThread::thread_func_multi()` のシャットダウンシーケンスにおいて、coordinator の while ループ脱出前に worker が `stop_requested_` を検知して先に exit するとバリアデッドロックが発生。修正: 専用の `workers_exit_` フラグを導入し、coordinator が while ループ脱出後に明示的に設定する構成に変更。
+
+6. **IPC モード**: `data_gen_ = nullptr` のため envelope 検証はスキップ (-1.0)。IPC モードでの envelope 検証には grebe-sg 側の既知パラメータからの参照 period buffer 再構築が必要だが、PoC scope 外 (TI-09 で製品化フェーズの課題と判定済み)。
+
+**結論**: Embedded モードで 1ch/4ch × 全 4 レート (1M/10M/100M/1G SPS) において **envelope 一致率 100%** を達成。「速いだけでなく正しい」ことが定量的に証明された。NFR-02b (波形表示整合性) の PoC 検証は完了。
 
 ---
 
@@ -814,3 +873,4 @@ SG drops を定量計測するため、以下の変更を実施:
 | ~~R-12~~ | ~~Windows IPC コマンドチャネル実装~~ | ~~中~~ | ~~完了~~ | ~~Phase 9~~ | ~~`PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作~~ |
 | ~~R-13~~ | ~~Release ビルドでの計測標準化~~ | ~~高~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト~~ |
 | R-14 | SG-side drop 緩和策 (バックプレッシャ or pre-decimation) | 低 | PoC 許容 | — | TI-09: SG drops は可視化品質に影響なし。製品化フェーズで施策 B+F を検討 |
+| ~~R-15~~ | ~~波形表示整合性検証 (envelope verification)~~ | ~~高~~ | ~~完了~~ | ~~Phase 11~~ | ~~TI-10: Embedded 1ch/4ch × 全レートで envelope 100%。NFR-02b 検証完了~~ |

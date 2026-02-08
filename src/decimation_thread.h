@@ -34,6 +34,8 @@ public:
     // Main thread: get latest decimated frame.
     // Returns true if new data was available; fills output and raw_sample_count.
     bool try_get_frame(std::vector<int16_t>& output, uint32_t& raw_sample_count);
+    bool try_get_frame(std::vector<int16_t>& output, uint32_t& raw_sample_count,
+                       std::vector<uint32_t>& per_ch_raw_out);
 
     // Telemetry (thread-safe, called from main thread)
     double decimation_time_ms() const { return decimate_time_ms_.load(std::memory_order_relaxed); }
@@ -77,6 +79,7 @@ private:
     std::mutex mutex_;
     std::vector<int16_t> front_buffer_;
     uint32_t front_raw_count_ = 0;
+    std::vector<uint32_t> front_per_ch_raw_;  // per-channel raw counts
     bool new_data_ = false;
 
     // Telemetry
@@ -88,5 +91,6 @@ private:
     std::vector<WorkerState> workers_;
     std::unique_ptr<std::barrier<>> start_barrier_;
     std::unique_ptr<std::barrier<>> done_barrier_;
+    std::atomic<bool> workers_exit_{false};  // set by coordinator only
     uint32_t num_workers_ = 0;
 };

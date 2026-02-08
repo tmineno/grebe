@@ -96,7 +96,7 @@
 - [x] ブロックサイズ最適化: デフォルト 16384、`--block-size=N` CLI (1024〜65536)
 - [x] sender thread の writev 最適化（Linux: header+payload を 1 syscall に統合）
 - [x] TI-07 追記: 最適化前後の帯域比較（WSL2 + Windows ネイティブ）
-- [x] Go/No-Go 判定: Windows ネイティブ >100 MB/s 達成 → **Phase 11 延期**
+- [x] Go/No-Go 判定: Windows ネイティブ >100 MB/s 達成 → **shm 延期**
 
 ### Phase 10-2: IPC ボトルネック再評価と次ステップ判定
 
@@ -127,31 +127,54 @@
 | PoC 目的 | ステータス | 根拠 |
 |---|---|---|
 | 1 GSPS リアルタイム描画 | **達成** | L0-L3 全 PASS (L3=2,022 FPS) |
-| パイプライン各段の定量計測 | **達成** | TI-01~09, BM-A/B/C/E |
+| パイプライン各段の定量計測 | **達成** | TI-01~10, BM-A/B/C/E |
 | ボトルネック特定・解消 | **達成** | CPU 間引き律速 → マルチスレッドで 0-drops |
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
+| 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
 | E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
+
+### Phase 11: 波形表示整合性検証（NFR-02b）
+
+**目標:** 高速ストリーミング条件下で、パイプライン出力が入力信号を忠実に再現していることを定量的に検証する。
+**リスク:** 低〜中（FrameHeaderV2 拡張 + profiler 拡張が主）
+**優先度:** **高** — 波形整合性は PoC の KSF。「速いだけでなく正しい」ことの証明。
+
+- [x] FrameHeaderV2 に `first_sample_index` 追加 + IPC sequence continuity check
+- [x] Sequence continuity check（フレーム欠落検知 + HUD/profile 表示）
+- [x] Window coverage 計測（HUD + profile レポート）
+- [x] EnvelopeVerifier 実装（cyclic sliding-window min/max, ±1 LSB 許容, per-channel）
+- [x] `--profile` に envelope 検証統合（Embedded: DataGenerator period buffer 直接参照）
+- [x] Per-channel raw counts の atomic 取得（DecimationThread::try_get_frame overload）
+- [x] マルチスレッド間引きのバリアデッドロック修正（workers_exit_ フラグ導入）
+- [x] TI-10 執筆: 波形整合性検証の結果分析
+
+**受入条件:**
+- [x] Embedded 1ch × 全レート: envelope 一致率 100%（±1 LSB）
+- [x] Embedded 4ch × 全レート: envelope 一致率 100%（±1 LSB）
+- [x] IPC モード: envelope スキップ (-1.0) を TI-10 に記録（DataGenerator 非参照のため）
+- [x] `--profile` JSON に envelope_match_rate + seq_gaps + window_coverage が含まれる
+- [x] HUD に seq_gaps, window_coverage がリアルタイム表示される
 
 ---
 
 ## 次期マイルストーン候補（優先度順）
 
-### Phase 11: E2E レイテンシ計測（NFR-02 検証）
+### Phase 12: E2E レイテンシ計測（NFR-02 検証）
 
 **目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
 **リスク:** 低（計測コード追加が主、既存動作への影響なし）
-**優先度:** 高 — PoC 要件定義 (NFR-02) の唯一の未検証項目。
+**優先度:** 高 — PoC 要件定義 (NFR-02) の未検証項目。
 
 - [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
 - [ ] HUD に E2E latency 表示追加
 - [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
 - [ ] Embedded / IPC 両モードでの計測・比較
-- [ ] TI-10 に計測結果と分析を記録
+- [ ] TI-11 に計測結果と分析を記録
 
 **受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
 
-### Phase 12: IPC 堅牢性向上（選択的実装）
+### Phase 13: IPC 堅牢性向上（選択的実装）
 
 **目標:** 現行 pipe IPC の信頼性を向上させる。shm 移行なしで実施可能な改善。
 **リスク:** 低〜中
@@ -164,23 +187,23 @@
 
 **受入条件:** CRC 不一致フレーム破棄が動作。1 時間連続実行でリーク/ハング/クラッシュなし。
 
-### Phase 12.5: 回帰検証マトリクス
+### Phase 13.5: 回帰検証マトリクス
 
 **目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
 **リスク:** 低（計測スクリプト追加が主）
-**優先度:** 中 — Phase 12 以降の各フェーズ完了時に実行し、意図しない劣化を早期検知。
+**優先度:** 中 — Phase 13 以降の各フェーズ完了時に実行し、意図しない劣化を早期検知。
 **出典:** TI-08-Codex-Review §Suggested Validation Matrix
 
 - [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
   - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
-  - メトリクス: FPS, viewer drops, SG drops, smp/f, E2E latency (Phase 11 後)
-  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, SG drops 比率安定 (IPC)
+  - メトリクス: FPS, viewer drops, SG drops, smp/f, envelope match, E2E latency (Phase 12 後)
+  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, envelope 100% (Embedded), SG drops 比率安定 (IPC)
 - [ ] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
-- [ ] Phase 12 完了後に初回実行、以後各フェーズ完了時に実行
+- [ ] Phase 13 完了後に初回実行、以後各フェーズ完了時に実行
 
 **受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。
 
-### Phase 13: DataSource 抽象化 + トランスポートシミュレータ
+### Phase 14: DataSource 抽象化 + トランスポートシミュレータ
 
 **目標:** データソースの pluggable 抽象化を導入し、帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
 **リスク:** 低〜中（Transport 抽象 I/F は Phase 8 で導入済み）
@@ -195,38 +218,23 @@
 
 **受入条件:** `DataSource` I/F 経由でデータが供給され、`--transport=sim --sim-bandwidth=500M --sim-latency=1ms` 等で帯域/遅延を注入でき、プロファイルレポートで差分を確認できること。
 
-### Phase 14a: SG Trigger + Capture Window メタデータ
+### Phase 15a: Trigger 拡張 — Internal Trigger
 
-**目標:** SG 側で trigger-aware なキャプチャを実装し、capture window 境界をメタデータとして IPC に伝搬する。
-**リスク:** 低〜中（SG 側の変更が主、viewer 側はメタデータ受信のみ）
-**優先度:** 中 — PoC→MVP 遷移の第一歩。timer モードだけでも window coverage 計測が可能になる。
-
-- [ ] SG 側 trigger mode 実装（timer をデフォルトとし、internal は次段階）
-- [ ] capture window 境界メタデータを IPC header に追加（trigger mode, capture boundary, window coverage）
-- [ ] Main 側で window coverage を受信・表示（HUD + profile レポート）
-
-**受入条件:** timer モードで capture window coverage が HUD と `--profile` JSON に表示されること。
-
-### Phase 14b: Main 側 Frame Validity 判定
-
-**目標:** Main 側で frame validity gating を実装し、invalid frame を明示的に検知・表示する。
-**リスク:** 低〜中（Phase 12 の CRC 実装と連携）
-**優先度:** 中 — Phase 12 (CRC, sequence) の上位レイヤーとして品質保証を追加。
-
-- [ ] Frame validity 判定ロジック（sequence continuity + CRC + window coverage）
-- [ ] invalid frame の HUD/ログ明示（silent success 禁止）
-- [ ] valid frame ratio を profile レポートに統合
-- [ ] PoC tier 品質メトリクス: window coverage ratio + valid frame ratio
-
-**受入条件:** invalid frame が HUD/ログで明示され、valid frame ratio が `--profile` に含まれること。
-
-### Phase 14c: Trigger 拡張 + 波形忠実度メトリクス（Product tier）
-
-**目標:** internal/external trigger と product-grade 波形忠実度メトリクスを追加する。
-**リスク:** 中〜高（Embedded 基準との同期比較フレームワークが必要）
+**目標:** SG 側で internal trigger（level/edge ベース捕捉）を実装する。
+**リスク:** 中（SG 側のキャプチャロジック変更）
 **優先度:** 低 — 製品化フェーズで必要になった時点で実施。
 
 - [ ] internal trigger パラメータ実装（level, edge, pre-trigger, post-trigger）
+- [ ] trigger-aligned frame assembly
+
+**受入条件:** internal trigger モードで level/edge 条件に基づく捕捉が動作すること。
+
+### Phase 15b: Trigger 拡張 — External Trigger + 波形忠実度メトリクス（Product tier）
+
+**目標:** external trigger と product-grade 波形忠実度メトリクスを追加する。
+**リスク:** 中〜高（Embedded 基準との同期比較フレームワークが必要）
+**優先度:** 低 — 製品化フェーズで必要になった時点で実施。
+
 - [ ] external trigger 入力パス（将来デバイス接続時）
 - [ ] 波形忠実度メトリクス（envelope mismatch rate, peak miss rate, extremum amplitude error p50/p95/p99）
 - [ ] Embedded 基準との同期比較フレームワーク
@@ -253,9 +261,9 @@
 3. `--attach-sg` (既存プロセス接続) モードが必要になった場合
 
 **スコープ (再開時):**
-- 11a: 基本 Shared Memory Ring (shm_open / CreateFileMapping 抽象化、DataRingV2)
-- 11b: 制御ブロックと Discovery (ControlBlockV2, ConsumerStatusBlockV2, --attach-sg)
-- 11c: フロー制御と障害復旧 (credit window, heartbeat, generation bump)
+- shm-a: 基本 Shared Memory Ring (shm_open / CreateFileMapping 抽象化、DataRingV2)
+- shm-b: 制御ブロックと Discovery (ControlBlockV2, ConsumerStatusBlockV2, --attach-sg)
+- shm-c: フロー制御と障害復旧 (credit window, heartbeat, generation bump)
 
 ---
 
@@ -273,7 +281,7 @@
 
 ### 製品化時
 
-- 実デバイス接続（PCIe DMA / USB3 / 10GbE）— Phase 13 の `DataSource` 抽象 I/F に接続
+- 実デバイス接続（PCIe DMA / USB3 / 10GbE）— Phase 14 の `DataSource` 抽象 I/F に接続
 - ウォーターフォール / スペクトログラム表示
 - 高度トリガ機能（パターントリガ等）
 - データ録画・再生
