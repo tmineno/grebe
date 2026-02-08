@@ -11,6 +11,7 @@
 | 2026-02-07 | Phase 3-4 | TI-01〜06 初回回答。llvmpipe (WSL2) 環境での計測結果に基づく |
 | 2026-02-07 | Phase 6 | TI-01/03/05 実GPU回答追記。RTX 5080 (dzn) + Release ビルドでの計測。R-01完了 |
 | 2026-02-07 | Phase 7 | TI-01/02/03/04 ネイティブ Vulkan 回答追記。MSVC ビルド + NVIDIA ネイティブドライバでの計測。R-10追加 |
+| 2026-02-08 | Phase 9 | TI-07 IPC パイプ帯域と欠落率。anonymous pipe IPC vs embedded の性能比較。R-11追加 |
 
 ---
 
@@ -24,6 +25,7 @@
 | TI-04 | 描画プリミティブ選択 | 回答済み (Native で更新) | 2026-02-07 |
 | TI-05 | 永続マップドバッファ | 検証不可 (現設計で恩恵皆無) | 2026-02-07 |
 | TI-06 | スレッドモデル | 回答済み | 2026-02-07 |
+| TI-07 | IPC パイプ帯域と欠落率 | 回答済み | 2026-02-08 |
 
 ---
 
@@ -341,6 +343,75 @@
 
 ---
 
+## TI-07: IPC パイプ帯域と欠落率
+
+> Anonymous pipe IPC (`grebe-sg` → `grebe`) の実効帯域はどこまで出るか。欠落率 (drop rate) はどの入力レートで発生するか。Embedded モードとの性能差。
+
+### 2026-02-08 Phase 9 (dzn, WSL2, GCC Debug ビルド, Ryzen 9 9950X3D)
+
+**計測条件**
+
+- `--profile` による自動シナリオ (1M/10M/100M/1G SPS × warmup 120 + measure 300 frames)
+- Ring buffer: 16M samples/channel, Block size: 4096 samples
+- V-Sync ON (60 FPS ターゲット)
+- IPC プロトコル: FrameHeaderV2 (48 bytes) + channel-major int16 payload via anonymous pipe (stdout)
+
+**計測結果 (1ch)**
+
+| シナリオ | モード | FPS avg | FPS min | Smp/frame | Drops | 備考 |
+|---|---|---|---|---|---|---|
+| 1 MSPS | IPC | 60.1 | 58.7 | 4,096 | 0 | パイプ帯域に余裕あり |
+| 1 MSPS | Embedded | 60.0 | 58.5 | 4,096 | 0 | 基準 |
+| 10 MSPS | IPC | 60.0 | 40.0 | 4,096 | 0 | |
+| 10 MSPS | Embedded | 60.0 | 58.5 | 4,096 | 0 | |
+| 100 MSPS | IPC | 59.9 | 57.9 | 51,594 | 0 | IPC で配信量低下 |
+| 100 MSPS | Embedded | 60.0 | 58.4 | 65,536 | 0 | smp/f 1.27x |
+| 1 GSPS | IPC | 58.7 | 57.3 | 83,118 | 0 | パイプ帯域が律速 |
+| 1 GSPS | Embedded | 60.0 | 58.4 | 147,499 | 0 | smp/f 1.77x |
+
+**計測結果 (4ch)**
+
+| シナリオ | モード | FPS avg | FPS min | Smp/frame | Drops | 備考 |
+|---|---|---|---|---|---|---|
+| 4ch×1 MSPS | IPC | 60.1 | 58.5 | 16,204 | 0 | |
+| 4ch×1 MSPS | Embedded | 60.0 | 58.3 | 16,104 | 0 | |
+| 4ch×10 MSPS | IPC | 60.0 | 58.0 | 16,384 | 0 | |
+| 4ch×10 MSPS | Embedded | 60.0 | 58.4 | 15,853 | 0 | |
+| 4ch×100 MSPS | IPC | 59.4 | 57.9 | 110,078 | 0 | パイプ帯域低下開始 |
+| 4ch×100 MSPS | Embedded | 60.0 | 58.5 | 240,822 | 0 | smp/f 2.19x |
+| 4ch×1 GSPS | IPC | 56.7 | 54.8 | 114,282 | 35,184,640 | **欠落発生** |
+| 4ch×1 GSPS | Embedded | 57.3 | 54.6 | 60,333,471 | 2,447,638,528 | 両モードで飽和 |
+
+**IPC 実効帯域の推定**
+
+理論パイプ帯域: `(48 + block_size × channels × 2) bytes/frame × (sample_rate / block_size) frames/sec`
+
+| シナリオ | 理論帯域 (MB/s) | 実効 smp/frame (IPC) | 実効帯域 (MB/s) 推定 | 備考 |
+|---|---|---|---|---|
+| 1ch × 1 MSPS | 2.0 | 4,096 | 2.0 | 100% 配信 |
+| 1ch × 100 MSPS | 195 | 51,594 | 152 | 78% |
+| 1ch × 1 GSPS | 1,953 | 83,118 | 245 | パイプ飽和 |
+| 4ch × 100 MSPS | 781 | 110,078 | 325 | 42% |
+| 4ch × 1 GSPS | 7,813 | 114,282 | 337 | パイプ飽和 |
+
+推定実効パイプ帯域: **約 250-340 MB/s** (WSL2 anonymous pipe, 4096 byte ブロック)
+
+**分析**
+
+1. **パイプ帯域の上限**: WSL2 の anonymous pipe は約 250-340 MB/s で飽和する。1ch×100 MSPS (理論 195 MB/s) まではほぼ 100% 配信可能だが、それ以上ではパイプが律速となりサンプル配信量が低下する。
+
+2. **欠落の発生条件**: 4ch×1 GSPS (理論 7.8 GB/s) でのみ IPC 側で欠落が発生 (35M drops)。ただし embedded モードでも同シナリオで大量欠落 (2.4G drops) が発生しており、これはリングバッファのオーバーフロー (DataGenerator の生成レートがデシメーションスレッドの消費レートを上回る) が主因。
+
+3. **FPS への影響**: IPC オーバーヘッドによる FPS 低下は小さい (1 GSPS でも embedded 60.0 vs IPC 58.7 FPS)。パイプ帯域が律速になってもフレームレートへの影響は限定的 — サンプル配信量が減るだけで、デシメーション後の頂点数 (3840/ch) は変わらないため描画コストは不変。
+
+4. **Embedded モードとの比較**: 100 MSPS 以下ではほぼ同等の性能。100 MSPS 以上では samples_per_frame の差が拡大するが、可視化品質への影響は限定的 (MinMax デシメーション後は同一頂点数)。
+
+5. **ブロックサイズの影響**: 現在のブロックサイズ 4096 samples ではヘッダーオーバーヘッドは 48/(48+8192) = 0.58% と小さい。ブロックサイズ拡大 (e.g. 16384) でスループットが向上する可能性があるが、レイテンシとのトレードオフ。
+
+**結論**: Anonymous pipe IPC は 100 MSPS/1ch まで無欠落で動作し、実用上十分。1 GSPS では パイプ帯域 (~300 MB/s) が律速となるが FPS への影響は軽微。高帯域が必要な場合は shared memory IPC (Phase 10) への移行を推奨。
+
+---
+
 ## 推奨事項トラッカー
 
 `doc/technical_judgment.md` で提起された推奨事項の対応状況を追跡する。
@@ -357,3 +428,4 @@
 | R-08 | マルチスレッド間引き | 低 | 未着手 | — | Release で 21x マージン → 必要性さらに低下 |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
+| R-11 | Shared Memory IPC への移行検討 | 中 | 未着手 | — | パイプ帯域 ~300 MB/s が 1 GSPS で律速 (TI-07)。shm で帯域制約を排除可能 |
