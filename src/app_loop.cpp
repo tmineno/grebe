@@ -268,6 +268,7 @@ void run_main_loop(AppComponents& app) {
             app.profiler->on_frame(*app.benchmark, app.buf_mgr->vertex_count(),
                                    data_rate,
                                    app.dec_thread->ring_fill_ratio(),
+                                   total_drops,
                                    *app.cmd_queue);
         }
 

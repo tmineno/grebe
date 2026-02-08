@@ -34,6 +34,7 @@ bool ProfileRunner::should_continue() const {
 
 void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              double data_rate, double ring_fill,
+                             uint64_t total_drops,
                              AppCommandQueue& cmd_queue) {
     if (finished_) return;
 
@@ -47,6 +48,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         frame_in_scenario_ = 0;
         current_samples_.clear();
         current_samples_.reserve(scenario.measure_frames);
+        drops_at_start_ = total_drops;
         cmd_queue.push(CmdSetSampleRate{scenario.sample_rate});
         spdlog::info("[profile] Starting scenario '{}' (rate={:.0f}, warmup={}, measure={})",
                      scenario.name, scenario.sample_rate,
@@ -111,11 +113,12 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         result.data_rate         = compute_stats(v_rate);
         result.ring_fill         = compute_stats(v_ring);
 
+        result.drop_total = total_drops - drops_at_start_;
         result.pass = result.fps.avg >= scenario.min_fps_threshold;
 
-        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} → {}",
+        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} drops={} → {}",
                      scenario.name, result.fps.avg, result.fps.min, result.fps.max,
-                     result.pass ? "PASS" : "FAIL");
+                     result.drop_total, result.pass ? "PASS" : "FAIL");
 
         results_.push_back(result);
 
@@ -169,17 +172,18 @@ int ProfileRunner::generate_report() const {
 
     // Stdout report
     spdlog::info("========== PROFILE REPORT ==========");
-    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>8}",
+    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}",
                  "Scenario", "FPS avg", "FPS min", "FPS p95",
-                 "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Result");
-    spdlog::info("{}", std::string(100, '-'));
+                 "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Drops", "Result");
+    spdlog::info("{}", std::string(110, '-'));
 
     for (const auto& r : results_) {
-        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>8}",
+        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>8}",
                      r.config.name,
                      r.fps.avg, r.fps.min, r.fps.p95,
                      r.frame_ms.avg, r.render_ms.avg,
                      r.vertex_count.avg, r.samples_per_frame.avg,
+                     r.drop_total,
                      r.pass ? "PASS" : "FAIL");
         if (!r.pass) overall_pass = false;
     }
@@ -215,6 +219,7 @@ int ProfileRunner::generate_report() const {
             {"data_rate",         stats_to_json(r.data_rate)},
             {"ring_fill",         stats_to_json(r.ring_fill)},
         };
+        s["drop_total"] = r.drop_total;
         s["pass"] = r.pass;
         scenarios_json.push_back(s);
     }

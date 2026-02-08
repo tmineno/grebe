@@ -131,7 +131,8 @@ static void command_reader_func(
         if (producer.receive_command(cmd)) {
             switch (static_cast<IpcCommand::Type>(cmd.type)) {
             case IpcCommand::SET_SAMPLE_RATE:
-                // Ignored: grebe-sg owns sample rate authority (Phase 9)
+                spdlog::info("grebe-sg: set sample rate to {:.0f}", cmd.value);
+                data_gen.set_sample_rate(cmd.value);
                 break;
             case IpcCommand::TOGGLE_PAUSED:
                 data_gen.set_paused(!data_gen.is_paused());

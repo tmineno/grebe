@@ -36,7 +36,8 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
                                uint32_t num_channels,
                                std::atomic<bool>& stop,
                                std::atomic<double>& sample_rate_out,
-                               DecimationThread& dec_thread) {
+                               DecimationThread& dec_thread,
+                               std::vector<DropCounter*>& drop_counters) {
     FrameHeaderV2 hdr{};
     std::vector<int16_t> payload;
     double last_rate = 0.0;
@@ -58,7 +59,10 @@ static void ipc_receiver_func(ITransportConsumer& consumer,
         for (uint32_t ch = 0; ch < ch_count; ch++) {
             size_t offset = static_cast<size_t>(ch) * hdr.block_length_samples;
             if (offset + hdr.block_length_samples <= payload.size()) {
-                rings[ch]->push_bulk(payload.data() + offset, hdr.block_length_samples);
+                size_t pushed = rings[ch]->push_bulk(payload.data() + offset, hdr.block_length_samples);
+                if (ch < drop_counters.size() && drop_counters[ch]) {
+                    drop_counters[ch]->record_push(hdr.block_length_samples, pushed);
+                }
             }
         }
     }
@@ -255,7 +259,8 @@ int main(int argc, char* argv[]) {
                                               opts.num_channels,
                                               std::ref(ipc_receiver_stop),
                                               std::ref(app.current_sample_rate),
-                                              std::ref(dec_thread));
+                                              std::ref(dec_thread),
+                                              std::ref(drop_ptrs));
         }
 
         run_main_loop(app);
