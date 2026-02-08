@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -169,14 +170,14 @@ bool ProcessHandle::spawn_with_pipes(const std::string& exe, const std::vector<s
     HANDLE stdin_read = nullptr, stdin_write = nullptr;
     HANDLE stdout_read = nullptr, stdout_write = nullptr;
 
-    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 4096)) {
         spdlog::error("ProcessHandle::spawn_with_pipes: CreatePipe(stdin) failed: {}", GetLastError());
         return false;
     }
     // Parent's write end should not be inherited
     SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
 
-    if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
+    if (!CreatePipe(&stdout_read, &stdout_write, &sa, 1048576)) {
         spdlog::error("ProcessHandle::spawn_with_pipes: CreatePipe(stdout) failed: {}", GetLastError());
         CloseHandle(stdin_read);
         CloseHandle(stdin_write);
@@ -330,6 +331,14 @@ bool ProcessHandle::spawn_with_pipes(const std::string& exe, const std::vector<s
         close(stdin_pipe[1]);
         return false;
     }
+
+    // Enlarge data pipe buffer (stdout) for higher IPC throughput
+#ifdef F_SETPIPE_SZ
+    int actual_sz = fcntl(stdout_pipe[1], F_SETPIPE_SZ, 1048576);
+    if (actual_sz > 0) {
+        spdlog::info("Pipe buffer enlarged to {} bytes", actual_sz);
+    }
+#endif
 
     pid_t child = fork();
     if (child < 0) {

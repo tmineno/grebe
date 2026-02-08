@@ -187,6 +187,7 @@ int main(int argc, char* argv[]) {
             std::string sg_path = find_sg_binary(argv[0]);
             std::vector<std::string> sg_args;
             sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
+            sg_args.push_back("--block-size=" + std::to_string(opts.block_size));
             if (opts.ring_size != 16'777'216) {
                 sg_args.push_back("--ring-size=" + std::to_string(opts.ring_size));
             }

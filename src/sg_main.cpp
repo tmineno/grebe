@@ -28,6 +28,7 @@ struct SgOptions {
     uint32_t num_channels = 1;
     double   sample_rate  = 1'000'000.0;
     size_t   ring_size    = 16'777'216;  // 16M samples
+    uint32_t block_size   = 16384;       // IPC block size (samples/channel/frame)
 };
 
 static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
@@ -50,6 +51,8 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
             else if (suffix == 'M' || suffix == 'm') sz *= 1024 * 1024;
             else if (suffix == 'G' || suffix == 'g') sz *= 1024 * 1024 * 1024;
             opts.ring_size = sz;
+        } else if (arg.rfind("--block-size=", 0) == 0) {
+            opts.block_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
         }
     }
     return 0;
@@ -165,8 +168,8 @@ int main(int argc, char* argv[]) {
     SgOptions opts;
     if (int rc = parse_sg_cli(argc, argv, opts); rc != 0) return rc;
 
-    spdlog::info("Starting: {}ch, {:.0f} SPS, ring={}",
-                 opts.num_channels, opts.sample_rate, opts.ring_size);
+    spdlog::info("Starting: {}ch, {:.0f} SPS, ring={}, block={}",
+                 opts.num_channels, opts.sample_rate, opts.ring_size, opts.block_size);
 
     // Init GLFW + OpenGL (optional — headless if window creation fails)
     bool has_window = false;
@@ -227,7 +230,7 @@ int main(int argc, char* argv[]) {
 
     // Start threads
     std::atomic<bool> stop_requested{false};
-    std::atomic<uint32_t> block_size{4096};
+    std::atomic<uint32_t> block_size{opts.block_size};
 
     std::thread sender(sender_thread_func,
                        std::ref(ring_ptrs), std::ref(producer),
@@ -246,7 +249,10 @@ int main(int argc, char* argv[]) {
 
     const uint32_t block_options[] = {1024, 2048, 4096, 8192, 16384, 65536};
     const char* block_labels[] = {"1024", "2048", "4096", "8192", "16384", "65536"};
-    int block_sel = 2;  // default 4096
+    int block_sel = 4;  // default 16384
+    for (int i = 0; i < 6; i++) {
+        if (block_options[i] == opts.block_size) { block_sel = i; break; }
+    }
 
     const char* waveform_labels[] = {"Sine", "Square", "Sawtooth", "WhiteNoise", "Chirp"};
     const WaveformType waveform_values[] = {

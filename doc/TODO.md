@@ -90,55 +90,56 @@
 - [x] `grebe` IPC モードでレート/Pause キー無効化（SG が権限者）
 - [x] E2E 動作確認: IPC / embedded / multi-channel / bench / profile 全モード PASS
 
+### Phase 10: Pipe IPC 最適化
+
+- [x] pipe バッファサイズ拡大: Windows `CreatePipe` 1MB、Linux `fcntl(F_SETPIPE_SZ)` 1MB
+- [x] ブロックサイズ最適化: デフォルト 16384、`--block-size=N` CLI (1024〜65536)
+- [x] sender thread の writev 最適化（Linux: header+payload を 1 syscall に統合）
+- [x] TI-07 追記: 最適化前後の帯域比較（WSL2 + Windows ネイティブ）
+- [x] Go/No-Go 判定: Windows ネイティブ >100 MB/s 達成 → **Phase 11 延期**
+
 ---
 
 ## 次期マイルストーン（実装予定）
 
-### 現状の IPC 性能ベースライン (TI-07)
+### Phase 10-2: IPC ボトルネック再評価と次ステップ判定
 
-Phase 9 の anonymous pipe IPC 計測結果を Phase 10 以降の判断基準とする。
+**目標:** Phase 10 の計測結果から残存ボトルネックを特定し、shm 実装 vs pipe/buffer 改善のどちらが本質的な問題に対する最適なアプローチかを評価する。
 
-**WSL2 (dzn, GCC Debug)**
+**背景:** Phase 10 で pipe 帯域は大幅に改善されたが、4ch×1GSPS で大量の drops が発生。ボトルネックがパイプ帯域から ring buffer overflow / decimation 消費レートへ移行した可能性がある。shm は pipe 帯域を排除するが、本質的なボトルネックが消費側にあるなら投資対効果が低い。
 
-| 条件 | 実効帯域 | Drops | FPS |
-|---|---|---|---|
-| 1ch × ≤100 MSPS | ~195 MB/s (100% 配信) | 0 | 60.0 |
-| 1ch × 1 GSPS | ~245 MB/s (パイプ飽和) | 0 | 58.7 |
-| 4ch × 100 MSPS | ~325 MB/s (42% 配信) | 0 | 59.4 |
-| 4ch × 1 GSPS | ~337 MB/s (パイプ飽和) | 35M | 56.7 |
+**評価項目:**
 
-**Windows ネイティブ (NVIDIA Vulkan, MSVC Release)**
+- [ ] **ボトルネック分析**: Phase 10 計測データから以下を定量評価
+  - パイプ帯域律速 vs ring buffer overflow vs decimation 消費レート律速の切り分け
+  - Embedded モードの 4ch×1G drops (WSL2: 2.4G) と IPC モードの drops の比較 → パイプ起因 vs 消費側起因の切り分け
+  - block_size 16384 vs 65536 で Windows drops が消滅 (5.29G→0) する原因分析（sender thread のレート制御特性？）
 
-| 条件 | 実効帯域 | Drops | FPS |
-|---|---|---|---|
-| 1ch × 10 MSPS | ~12 MB/s | 0 | 60.1 |
-| 1ch × 100 MSPS | ~13 MB/s (パイプ飽和) | 0 | 60.1 |
-| 4ch × 10 MSPS | ~36 MB/s | 0 | 60.0 |
-| 4ch × 100 MSPS | ~9 MB/s (パイプ飽和) | 0 | 60.1 |
+- [ ] **shm 実装の投資対効果評価**
+  - shm で解消される問題: パイプバッファコピー 1 回分のレイテンシ削減、カーネル-ユーザ空間切替コスト排除
+  - shm で解消されない問題: ring buffer overflow、decimation thread の消費レート上限
+  - 実装リスク: OS API 差異 (POSIX shm_open vs Win32 CreateFileMapping)、同期プリミティブ、障害復旧、WSL2 shm 制約
+  - 実装コスト見積: 11a/11b/11c の段階的実装 → 投下工数が大きい
 
-**重要な知見:**
-- パイプ帯域が律速になっても FPS への影響は軽微（サンプル配信量が減るだけでデシメーション後の頂点数は不変）
-- **Windows ネイティブのパイプ帯域は WSL2 の 1/10〜1/30** (~10-36 MB/s vs ~300 MB/s)。Windows の anonymous pipe デフォルトバッファ (4 KB) がボトルネック
-- Phase 10 での最適化は特に Windows ネイティブで大きな改善が期待できる
+- [ ] **pipe/buffer 側改善の投資対効果評価**
+  - 改善候補: ring buffer サイズ拡大 (64M→256M+)、decimation thread マルチスレッド化、adaptive block size
+  - 改善で解消される問題: ring overflow (バッファ拡大)、消費レート上限 (並列化)
+  - 実装リスク: 低〜中（既存コードの拡張が主）
+  - 実装コスト見積: 各改善は独立して適用可能、段階的に効果を確認できる
 
-### Phase 10: Pipe IPC 最適化
+- [ ] **判定と次ステップ記録**: TI-08 として以下を文書化
+  - ボトルネック分析の結論
+  - shm vs pipe/buffer 改善のリスク・効果比較マトリクス
+  - 推奨する次ステップの根拠
 
-**目標:** 既存 pipe transport のバッファ・ブロックサイズ最適化で、shm 移行前にどこまで改善可能かを確認する。特に Windows ネイティブの低帯域 (~10-36 MB/s) を改善する。
-**リスク:** 低（既存コードの定数変更とOS API呼び出しが主）
-**Go/No-Go:** 最適化後の帯域を WSL2/Windows 両環境で計測。Windows で 100 MB/s 未満なら Phase 11 (shm) を開始。WSL2 では既に十分だが改善余地を確認。
+**受入条件:** TI-08 にボトルネック分析と判定根拠が記録され、次フェーズの方向性が決定されていること。
 
-- [ ] pipe バッファサイズ拡大: Windows `CreatePipe` のバッファサイズ指定 (4KB → 64KB+)、Linux `fcntl(F_SETPIPE_SZ)` (64KB → 1MB)
-- [ ] ブロックサイズ最適化: 4096 → 16384/65536 の帯域・レイテンシ比較計測
-- [ ] sender thread の write batching 改善（複数ブロックの一括 write 呼び出し）
-- [ ] TI-07 追記: 最適化前後の帯域比較（WSL2 + Windows ネイティブ）、Go/No-Go 判定記録
+### Phase 11: Shared Memory IPC 基盤（延期）
 
-**受入条件:** 帯域計測結果と Go/No-Go 判定を TI-07 に追記。改善が不十分な場合は Phase 11 の実施を決定。
-
-### Phase 11: Shared Memory IPC 基盤
-
-**目標:** Pipe transport を Shared Memory に置換し、パイプ帯域制約 (~300 MB/s) を排除する。
+**目標:** Pipe transport を Shared Memory に置換し、パイプ帯域制約を排除する。
 **リスク:** 高（OS API 依存、同期プリミティブ、障害復旧の複雑さ）
 **前提:** Phase 10 の Go/No-Go で shm 移行が必要と判定されていること。
+**状態:** Phase 10 で pipe 最適化が十分な帯域を達成したため延期。必要になった時点で再開。
 
 **リスク緩和策:**
 - 各サブステップ完了時に pipe fallback を維持し、shm 不具合時に `--transport=pipe` で切り戻し可能とする

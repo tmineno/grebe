@@ -13,6 +13,7 @@
 | 2026-02-07 | Phase 7 | TI-01/02/03/04 ネイティブ Vulkan 回答追記。MSVC ビルド + NVIDIA ネイティブドライバでの計測。R-10追加 |
 | 2026-02-08 | Phase 9 | TI-07 IPC パイプ帯域と欠落率。anonymous pipe IPC vs embedded の性能比較。R-11追加 |
 | 2026-02-08 | Phase 9 | TI-07 Windows ネイティブ追記。R-12 解消 (PeekNamedPipe)。Windows パイプ帯域 ~10-36 MB/s (WSL2 比 1/10〜1/30) |
+| 2026-02-08 | Phase 10 | TI-07 Pipe 最適化後追記。バッファ 1MB + block 16K/64K + writev。Windows 帯域 ~10→~100-470 MB/s。Go/No-Go: Phase 11 延期 |
 
 ---
 
@@ -27,6 +28,7 @@
 | TI-05 | 永続マップドバッファ | 検証不可 (現設計で恩恵皆無) | 2026-02-07 |
 | TI-06 | スレッドモデル | 回答済み | 2026-02-07 |
 | TI-07 | IPC パイプ帯域と欠落率 | 回答済み (WSL2 + Native) | 2026-02-08 |
+| TI-08 | IPC ボトルネック再評価と次ステップ判定 | 未着手 | — |
 
 ---
 
@@ -484,6 +486,68 @@
 
 **結論 (更新)**: Windows ネイティブの anonymous pipe 帯域は WSL2 比で大幅に低い (~10-36 MB/s vs ~300 MB/s)。ただし FPS への影響は皆無 (全シナリオ 60 FPS, 0 drops)。可視化品質は十分だが、高レートでの smp/frame が低下する。Phase 10 でのパイプバッファ最適化で改善が期待できる。
 
+### 2026-02-08 Phase 10: Pipe IPC 最適化後
+
+**最適化内容**
+
+1. **パイプバッファ拡大**: Windows `CreatePipe` バッファ 0 (=4KB) → 1MB、Linux `fcntl(F_SETPIPE_SZ)` 64KB → 1MB
+2. **デフォルトブロックサイズ変更**: 4096 → 16384 samples/channel/frame (`--block-size=N` CLI 追加)
+3. **writev 最適化 (Linux)**: header+payload を 1 回のシステムコールで送信
+
+**計測条件**
+
+- `--profile` 自動シナリオ (1M/10M/100M/1G SPS × warmup 120 + measure 300 frames)
+- Ring buffer: 64M samples/channel, V-Sync ON (60 FPS ターゲット)
+- ブロックサイズ: 16384 (デフォルト) と 65536 の 2 パターン計測
+
+**WSL2 計測結果 (dzn, GCC Debug)**
+
+| シナリオ | block=4096 (Phase 9) | block=16384 | block=65536 | 改善率 (16K) |
+|---|---|---|---|---|
+| 1ch×100M | smp/f=51,594 | 59,566 | 65,536 | 1.15x |
+| 1ch×1G | smp/f=83,118 | 138,434 | 189,231 | 1.67x |
+| 4ch×100M | smp/f=110,078 | 191,884 | 255,976 | 1.74x |
+| 4ch×1G | smp/f=114,282 (35M drops) | 18,957,171 (1.06G drops) | 45,293,051 (2.58G drops) | >>10x |
+
+- 全シナリオ 60 FPS 維持、embedded baseline リグレッションなし
+- 4ch×1G ではパイプ帯域の制約が解消され、ring buffer overflow がボトルネックに移行
+
+**Windows ネイティブ計測結果 (NVIDIA Vulkan, MSVC Release)**
+
+| シナリオ | block=4096 (Phase 9) | block=16384 | block=65536 | 改善率 (16K) |
+|---|---|---|---|---|
+| 1ch×10M | smp/f=95,732 | 133,508 | 160,938 | 1.4x |
+| 1ch×100M | smp/f=111,532 | 694,261 | 1,310,647 | 6.2x |
+| 1ch×1G | smp/f=7,875 | 946,959 | 3,957,748 | 120x |
+| 4ch×10M | smp/f=298,481 | 622,380 | 592,208 | 2.1x |
+| 4ch×100M | smp/f=75,725 | 2,257,173 | 1,175,115 | 29.8x |
+| 4ch×1G | smp/f=56,884 (0 drops) | 49,220,018 (5.29G drops) | 1,886,708 (0 drops) | 865x |
+
+- 全シナリオ 60 FPS 維持
+- **Windows 帯域が 1 桁〜2 桁改善**: `CreatePipe` バッファ 1MB 化が最大の効果
+
+**実効帯域推定 (Phase 10 block=16384)**
+
+| 環境 | 1ch×1G smp/f | 推定帯域 (MB/s) | Phase 9 比 |
+|---|---|---|---|
+| WSL2 | 138,434 | ~410 | 1.67x (245→410) |
+| Windows | 946,959 | ~114 | ~8x (10-36→114) |
+
+**分析**
+
+1. **Windows の劇的改善**: `CreatePipe` バッファ 4KB → 1MB により、Windows ネイティブの IPC 帯域が ~10 MB/s → ~100-470 MB/s に改善。ブロックサイズ 65536 では 1ch×1G で smp/f が 500x 以上向上。
+2. **WSL2 でも改善**: パイプバッファ 1MB + writev により 1.5-2x の帯域改善。ただし 4ch×1G ではパイプが解消した代わりにリングバッファ overflow が顕在化。
+3. **ブロックサイズの効果**: 16384 → 65536 でさらに帯域が向上するが、4ch×1G では挙動が異なる (16384: 大量 drops 発生 vs 65536: 0 drops)。大きいブロックは sender thread のレート制御に影響。
+4. **ボトルネック移行**: Windows では pipe が律速でなくなり、DataGenerator の生成レートや ring buffer サイズがボトルネックに。WSL2 4ch×1G でも同様の移行が発生。
+
+**Go/No-Go 判定**
+
+- **基準**: Windows ネイティブで 100 MB/s 以上 → Phase 11 延期可能
+- **結果**: 1ch×1G block=16384 で ~114 MB/s、block=65536 で ~475 MB/s → **100 MB/s を超過**
+- **判定: Phase 11 (Shared Memory) 延期**。現行 pipe 最適化で実用上十分な帯域を確保。
+
+**結論 (Phase 10)**: パイプバッファ拡大 (1MB) とブロックサイズ増 (16384) で、特に Windows ネイティブの IPC 帯域を大幅改善。Phase 9 で課題だった Windows の低帯域 (~10-36 MB/s) は解消され、100 MB/s 以上を達成。Phase 11 (Shared Memory) の即時実装は不要と判定。将来的に 4ch×1GSPS の ring buffer overflow 対策が必要な場合に shm を再検討。
+
 ---
 
 ## 推奨事項トラッカー
@@ -502,5 +566,5 @@
 | R-08 | マルチスレッド間引き | 低 | 未着手 | — | Release で 21x マージン → 必要性さらに低下 |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
-| R-11 | Shared Memory IPC への移行検討 | 中 | 未着手 | — | パイプ帯域 ~300 MB/s が 1 GSPS で律速 (TI-07)。shm で帯域制約を排除可能 |
+| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | Phase 10 pipe 最適化で Windows ~114 MB/s 達成。Go/No-Go で延期判定。4ch×1G の ring overflow 対策で再検討 |
 | R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <poll.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -72,11 +73,44 @@ PipeProducer::PipeProducer()
 #endif
 
 bool PipeProducer::send_frame(const FrameHeaderV2& header, const void* payload) {
+#ifndef _WIN32
+    // Use writev to send header+payload in a single syscall
+    struct iovec iov[2];
+    iov[0].iov_base = const_cast<void*>(static_cast<const void*>(&header));
+    iov[0].iov_len = sizeof(header);
+    int iovcnt = 1;
+    size_t total = sizeof(header);
+    if (header.payload_bytes > 0 && payload) {
+        iov[1].iov_base = const_cast<void*>(payload);
+        iov[1].iov_len = header.payload_bytes;
+        iovcnt = 2;
+        total += header.payload_bytes;
+    }
+    size_t written = 0;
+    while (written < total) {
+        ssize_t n = ::writev(write_fd_, iov, iovcnt);
+        if (n <= 0) return false;
+        written += static_cast<size_t>(n);
+        // Advance iovecs past completed segments
+        size_t adv = static_cast<size_t>(n);
+        while (iovcnt > 0 && adv >= iov[0].iov_len) {
+            adv -= iov[0].iov_len;
+            iov[0] = iov[1];
+            iovcnt--;
+        }
+        if (iovcnt > 0 && adv > 0) {
+            iov[0].iov_base = static_cast<char*>(iov[0].iov_base) + adv;
+            iov[0].iov_len -= adv;
+        }
+    }
+    return true;
+#else
     if (!write_all(write_fd_, &header, sizeof(header))) return false;
     if (header.payload_bytes > 0 && payload) {
         if (!write_all(write_fd_, payload, header.payload_bytes)) return false;
     }
     return true;
+#endif
 }
 
 bool PipeProducer::receive_command(IpcCommand& cmd) {
