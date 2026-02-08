@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <utility>
 
 uint32_t EnvelopeVerifier::pack_pair(int16_t lo, int16_t hi) {
     return (static_cast<uint32_t>(static_cast<uint16_t>(lo)) << 16) |
@@ -10,7 +11,7 @@ uint32_t EnvelopeVerifier::pack_pair(int16_t lo, int16_t hi) {
 
 void EnvelopeVerifier::build_window_set(const int16_t* period_buf, size_t period_len,
                                           size_t window_size,
-                                          std::unordered_set<uint32_t>& out) {
+                                          std::vector<uint32_t>& out) {
     out.clear();
     if (window_size == 0 || period_len == 0) return;
 
@@ -21,7 +22,7 @@ void EnvelopeVerifier::build_window_set(const int16_t* period_buf, size_t period
             if (period_buf[i] < gmin) gmin = period_buf[i];
             if (period_buf[i] > gmax) gmax = period_buf[i];
         }
-        out.insert(pack_pair(gmin, gmax));
+        out.push_back(pack_pair(gmin, gmax));
         return;
     }
 
@@ -58,8 +59,12 @@ void EnvelopeVerifier::build_window_set(const int16_t* period_buf, size_t period
 
     out.reserve(period_len);
     for (size_t s = 0; s < period_len; s++) {
-        out.insert(pack_pair(wmins[s], wmaxs[s]));
+        out.push_back(pack_pair(wmins[s], wmaxs[s]));
     }
+
+    // Sort and deduplicate for binary_search in verify()
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
 void EnvelopeVerifier::rebuild(const int16_t* period_buf, size_t period_len,
@@ -111,8 +116,9 @@ EnvelopeResult EnvelopeVerifier::verify(const int16_t* decimated, uint32_t num_b
                 int thi = static_cast<int>(hi) + dh;
                 if (tlo < -32768 || tlo > 32767) continue;
                 if (thi < -32768 || thi > 32767) continue;
-                if (valid_set.count(pack_pair(static_cast<int16_t>(tlo),
-                                              static_cast<int16_t>(thi)))) {
+                if (std::binary_search(valid_set.begin(), valid_set.end(),
+                                       pack_pair(static_cast<int16_t>(tlo),
+                                                 static_cast<int16_t>(thi)))) {
                     matched = true;
                 }
             }

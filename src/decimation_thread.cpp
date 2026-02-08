@@ -24,7 +24,7 @@ void DecimationThread::start(std::vector<RingBuffer<int16_t>*> rings, uint32_t t
 
     uint32_t num_ch = static_cast<uint32_t>(rings_.size());
 
-    // Determine worker count: 1ch → single-thread, multi-ch → workers
+    // Determine worker count: single-thread for 1ch, multi-thread for 2+ch.
     if (num_ch <= 1) {
         num_workers_ = 0;
     } else {
@@ -56,9 +56,13 @@ void DecimationThread::start(std::vector<RingBuffer<int16_t>*> rings, uint32_t t
             }
         }
 
-        // Create barriers: num_workers + 1 (coordinator)
-        start_barrier_ = std::make_unique<std::barrier<>>(num_workers_ + 1);
-        done_barrier_ = std::make_unique<std::barrier<>>(num_workers_ + 1);
+        // Initialize synchronization state
+        {
+            std::lock_guard<std::mutex> lock(work_mutex_);
+            work_generation_ = 0;
+            done_count_ = 0;
+            workers_exit_ = false;
+        }
 
         // Launch worker threads
         for (uint32_t w = 0; w < num_workers_; w++) {
@@ -77,18 +81,17 @@ void DecimationThread::stop() {
 
     stop_requested_.store(true, std::memory_order_relaxed);
 
-    // Unblock workers waiting on start_barrier
-    if (num_workers_ > 0 && start_barrier_) {
-        // Coordinator needs to arrive at start_barrier to release workers
-        // so they can observe stop_requested_ and exit.
-        // The coordinator thread will do this when it exits its loop.
+    // Wake workers so they can observe exit flag
+    if (num_workers_ > 0) {
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        workers_exit_ = true;
+        work_cv_.notify_all();
     }
 
     if (thread_.joinable()) {
         thread_.join();
     }
 
-    // Workers should have exited by now (coordinator released them before exiting)
     for (auto& w : workers_) {
         if (w.thread.joinable()) {
             w.thread.join();
@@ -96,9 +99,12 @@ void DecimationThread::stop() {
     }
 
     workers_.clear();
-    start_barrier_.reset();
-    done_barrier_.reset();
-    workers_exit_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        workers_exit_ = false;
+        work_generation_ = 0;
+        done_count_ = 0;
+    }
     num_workers_ = 0;
     running_.store(false, std::memory_order_relaxed);
     spdlog::info("DecimationThread stopped");
@@ -168,7 +174,7 @@ void DecimationThread::thread_func() {
     }
 }
 
-// Single-channel optimized path (no worker threads) — same as original implementation
+// Single-channel optimized path (no worker threads)
 void DecimationThread::thread_func_single() {
     uint32_t num_ch = static_cast<uint32_t>(rings_.size());
     std::vector<std::vector<int16_t>> drain_bufs(num_ch);
@@ -257,7 +263,9 @@ void DecimationThread::thread_func_single() {
     }
 }
 
-// Multi-channel path with worker threads
+// Multi-channel path with worker threads using condition_variable sync.
+// Uses CV-based signaling instead of std::barrier to avoid aggressive
+// spin-waiting that causes CPU starvation on some platforms (Windows/MSVC).
 void DecimationThread::thread_func_multi() {
     uint32_t num_ch = static_cast<uint32_t>(rings_.size());
 
@@ -275,10 +283,20 @@ void DecimationThread::thread_func_multi() {
         auto t0 = std::chrono::steady_clock::now();
 
         // Signal workers to start drain+decimate
-        start_barrier_->arrive_and_wait();
+        {
+            std::lock_guard<std::mutex> lock(work_mutex_);
+            work_generation_++;
+            done_count_ = 0;
+        }
+        work_cv_.notify_all();
 
         // Wait for all workers to complete
-        done_barrier_->arrive_and_wait();
+        {
+            std::unique_lock<std::mutex> lock(work_mutex_);
+            done_cv_.wait(lock, [&] {
+                return done_count_ >= num_workers_;
+            });
+        }
 
         auto t1 = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -334,35 +352,45 @@ void DecimationThread::thread_func_multi() {
             front_per_ch_raw_ = std::move(per_ch_raw);
             new_data_ = true;
         }
+
+        // Pace at extreme sample rates (≥500 MSPS) to prevent the
+        // DataGenerator busy-wait from starving the render thread.
+        if (sample_rate_.load(std::memory_order_relaxed) >= 500e6) {
+            constexpr auto MIN_FRAME_INTERVAL = std::chrono::milliseconds(2);
+            auto frame_elapsed = std::chrono::steady_clock::now() - t0;
+            if (frame_elapsed < MIN_FRAME_INTERVAL) {
+                std::this_thread::sleep_for(MIN_FRAME_INTERVAL - frame_elapsed);
+            }
+        }
     }
 
-    // Signal workers to exit, then release them via barriers
-    workers_exit_.store(true, std::memory_order_relaxed);
-    start_barrier_->arrive_and_wait();
-    done_barrier_->arrive_and_wait();
+    // Signal workers to exit
+    {
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        workers_exit_ = true;
+    }
+    work_cv_.notify_all();
 }
 
 void DecimationThread::worker_func(uint32_t worker_id) {
     auto& state = workers_[worker_id];
-    auto mode_val = mode_.load(std::memory_order_relaxed);
-    auto target = target_points_.load(std::memory_order_relaxed);
+    uint32_t last_generation = 0;
 
     while (true) {
-        // Wait for coordinator to signal start
-        start_barrier_->arrive_and_wait();
+        // Wait for coordinator to signal new work (or exit)
+        {
+            std::unique_lock<std::mutex> lock(work_mutex_);
+            work_cv_.wait(lock, [&] {
+                return workers_exit_ || work_generation_ > last_generation;
+            });
 
-        // Only exit when coordinator explicitly sets workers_exit_ (after its while loop).
-        // Using stop_requested_ here would race: if stop is requested between the
-        // coordinator's while-loop check and its start_barrier arrival, workers would
-        // exit early, leaving the coordinator's shutdown barrier sequence deadlocked.
-        if (workers_exit_.load(std::memory_order_relaxed)) {
-            done_barrier_->arrive_and_wait();
-            break;
+            if (workers_exit_) break;
+            last_generation = work_generation_;
         }
 
         // Read current settings
-        mode_val = mode_.load(std::memory_order_relaxed);
-        target = target_points_.load(std::memory_order_relaxed);
+        auto mode_val = mode_.load(std::memory_order_relaxed);
+        auto target = target_points_.load(std::memory_order_relaxed);
 
         // LTTB high-rate guard
         if (mode_val == DecimationMode::LTTB && sample_rate_.load(std::memory_order_relaxed) >= 100e6) {
@@ -399,6 +427,10 @@ void DecimationThread::worker_func(uint32_t worker_id) {
         }
 
         // Signal completion
-        done_barrier_->arrive_and_wait();
+        {
+            std::lock_guard<std::mutex> lock(work_mutex_);
+            done_count_++;
+        }
+        done_cv_.notify_one();
     }
 }

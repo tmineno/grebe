@@ -69,6 +69,7 @@ private:
     void write_log_row();
 
     TimePoint frame_start_{};
+    bool      frame_started_ = false;
     double    frame_time_ms_ = 0.0;
     double    frame_time_avg_ = 0.0;
     double    fps_ = 0.0;

@@ -31,6 +31,8 @@ int parse_cli(int argc, char* argv[], CliOptions& opts) {
                 spdlog::error("--channels must be 1-8, got {}", opts.num_channels);
                 return 1;
             }
+        } else if (arg == "--no-vsync") {
+            opts.no_vsync = true;
         } else if (arg.rfind("--block-size=", 0) == 0) {
             opts.block_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
             if (opts.block_size < 1024 || opts.block_size > 65536 ||

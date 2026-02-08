@@ -1,6 +1,6 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.4.0
+**バージョン:** 1.5.0
 **最終更新:** 2026-02-08
 
 ---
@@ -9,7 +9,7 @@
 
 ### 1.1 目的
 
-Vulkan を用いた時系列データストリームの高速描画パイプラインの技術的限界を検証する PoC/MVP を構築する。最終的なゴールはリアルタイム信号可視化基盤の実現可能性評価であり、本PoCではパイプライン各段のスループット・レイテンシを定量的に計測し、ボトルネックを特定する。
+Vulkan を用いた時系列データストリームの高速描画パイプラインの技術的限界を検証する PoC/MVP を構築する。最終的なゴールはリアルタイム信号可視化基盤の実現可能性評価であり、本PoCではパイプライン各段のスループット・レイテンシを定量的に計測してボトルネックを特定するとともに、高速ストリーミング条件下で表示波形が入力信号を忠実に再現していることを定量的に検証する。
 
 ### 1.2 背景・動機
 
@@ -276,19 +276,29 @@ v2 既定値:
 | 通知 | poll + optional doorbell | NVMe/xHCI |
 | 信頼性 | loss-tolerant realtime + drop accounting | UDP realtime profile |
 
-### 3.5 トリガベース捕捉と同期整合性（SG/Main 両側）
+### 3.5 同期整合性とトリガベース捕捉（SG/Main 両側）
 
-表示フレームの時間整合性を確保するため、`grebe-sg` と `grebe` の双方で
-trigger-aware な捕捉を行う。
+表示波形が入力信号を忠実に再現していることを保証するため、
+`grebe-sg` と `grebe` の双方で同期・検証機構を実装する。
 
-- SG 側（source authority）:
-  - internal trigger / external trigger / periodic timer を提供する
-  - trigger 判定は SG のサンプル生成クロック上で実施する
-  - capture window（pre/post trigger）単位でデータを送出し、境界情報を付与する
-- Main 側（render authority）:
-  - 受信した capture 境界と sequence 連続性を検証する
-  - frame validity を判定し、invalid frame を明示表示する
-  - timer fallback 時は window coverage を品質指標として継続監視する
+#### PoC 必須（Phase 11 scope）
+
+- SG 側:
+  - periodic timer による固定周期 capture window でデータを送出する
+  - 各フレームに capture window 境界（開始/終了タイムスタンプ、サンプル数）を付与する
+- Main 側:
+  - sequence continuity を検証し、フレーム欠落を検知する
+  - window coverage（capture window 充足率）を品質指標として継続監視する
+  - 既知合成信号に対する envelope 検証を `--profile` に統合する
+
+#### 製品拡張（Phase 15+ scope）
+
+- SG 側:
+  - internal trigger（level/edge, pre/post trigger window）を追加する
+  - external trigger 入力パスを提供し、フォールバックとして timer を利用可能にする
+- Main 側:
+  - trigger-aligned frame validity 判定を実装する
+  - Embedded 基準との同期比較フレームワークを構築する
 
 ---
 
@@ -335,7 +345,8 @@ trigger-aware な捕捉を行う。
 
 - **FR-05.1:** 自動プロファイリングシーケンス (`--profile`) を実行可能にする
   - 4シナリオ (1M/10M/100M/1G SPS) × 各 120 フレームウォームアップ + 300 フレーム計測
-  - JSON レポート出力、pass/fail 判定（≥30 FPS）
+  - JSON レポート出力、pass/fail 判定（≥30 FPS + envelope 一致率）
+  - 各シナリオで既知合成信号の MinMax 出力を理論 envelope と比較し、一致率を計測する
 - **FR-05.2:** ベンチマーク結果を CSV/JSON ファイルに出力する
 - **FR-05.3:** 以下の独立したマイクロベンチマーク (`--bench`) を提供する
   - **BM-A:** CPU→GPU 転送スループット（vkCmdCopyBuffer, 1/4/16/64 MB）
@@ -433,8 +444,8 @@ trigger-aware な捕捉を行う。
   - capture window 充足率（不足時 invalid）
 - **FR-11.3:** invalid frame は HUD/ログ/プロファイルで明示し、silent success を禁止する
 - **FR-11.4:** 波形整合性メトリクスを段階的に導入する
-  - **PoC tier（Phase 14a/b）:** window coverage ratio、valid frame ratio
-  - **Product tier（将来）:** envelope mismatch rate（Embedded 参照比較）、peak miss rate、extremum amplitude error（p50/p95/p99）
+  - **PoC tier（Phase 11）:** window coverage ratio、valid frame ratio、既知信号 envelope 検証（MinMax 出力 vs 理論 envelope、±1 LSB 許容）
+  - **Product tier（将来）:** Embedded/IPC 比較 envelope mismatch rate、peak miss rate、extremum amplitude error（p50/p95/p99）
 - **FR-11.5:** viewer drops と SG drops を別系統で記録し、品質判定に反映する
 
 ---
@@ -466,13 +477,18 @@ trigger-aware な捕捉を行う。
 - 目標: L1 で 50ms 以下、L2 で 100ms 以下
 - 推定: ring buffer + ダブルバッファ + V-Sync の 3 フレーム分 ≈ 50ms
 
-### NFR-02b: トリガ整合性
+### NFR-02b: 波形表示整合性
 
-- trigger lock 後の invalid frame 率を継続監視する
+- 既知合成信号に対する envelope 一致検証を `--profile` で自動実行する
+  - Embedded モード: envelope 一致率 100%（±1 LSB）を必須とする
+  - IPC モード: SG-side drops に応じた乖離を定量計測し、TI-10 で評価する
+- sequence continuity（フレーム欠落なし）を検証する
+  - Embedded モード: 欠落 0 を必須とする
+  - IPC モード: 欠落率を計測し記録する
 - periodic timer モードでは window coverage の下限しきい値を定義する
   - Embedded モード: 95% 以上を目標
   - IPC モード: SG-side drops の影響により低下する（TI-09: 4ch×1G で ~63%）。モード別に閾値を設定し、pipe 帯域制約下での許容範囲を明記する
-- PoC tier の品質判定は FPS/頂点数 + valid frame ratio + window coverage ratio で行う。Product tier の整合性メトリクス（FR-11.4 product tier）は製品化フェーズで追加する
+- PoC tier の品質判定は FPS/頂点数 + envelope 一致率 + valid frame ratio + window coverage ratio で行う。Product tier の整合性メトリクス（FR-11.4 product tier）は製品化フェーズで追加する
 
 ### NFR-03: メモリ使用量
 

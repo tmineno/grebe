@@ -271,6 +271,7 @@
 
 ### 優先度中
 
+- IPC モードでの envelope 検証（grebe-sg 側の period buffer を既知パラメータから grebe 側で再構築、または IPC 経由で period buffer を伝送。Phase 11 で Embedded のみ検証済み）
 - AVX2 MinMax 最適化（SSE2 → AVX2, 処理幅 8→16 倍増。ただし現行 21x マージンで必要性低）
 - SG-side pre-decimation（pipe 前に間引き → 帯域要求 ~1000x 削減、TI-09 施策 B）
 

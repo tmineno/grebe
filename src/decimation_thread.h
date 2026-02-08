@@ -4,7 +4,7 @@
 #include "ring_buffer.h"
 
 #include <atomic>
-#include <barrier>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -87,10 +87,14 @@ private:
     std::atomic<double> decimate_ratio_{1.0};
     std::atomic<double> ring_fill_{0.0};
 
-    // Multi-threaded worker state
+    // Multi-threaded worker synchronization (condition_variable-based,
+    // avoids aggressive spinning of std::barrier on some platforms)
     std::vector<WorkerState> workers_;
-    std::unique_ptr<std::barrier<>> start_barrier_;
-    std::unique_ptr<std::barrier<>> done_barrier_;
-    std::atomic<bool> workers_exit_{false};  // set by coordinator only
+    std::mutex work_mutex_;
+    std::condition_variable work_cv_;       // coordinator → workers
+    std::condition_variable done_cv_;       // workers → coordinator
+    uint32_t work_generation_ = 0;         // incremented each cycle
+    uint32_t done_count_ = 0;              // workers completed this cycle
+    bool workers_exit_ = false;
     uint32_t num_workers_ = 0;
 };

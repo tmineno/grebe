@@ -19,17 +19,22 @@ void Benchmark::RollingAvg::push(double val) {
 }
 
 void Benchmark::frame_begin() {
-    frame_start_ = Clock::now();
+    auto now = Clock::now();
+
+    // Measure wall-clock frame-to-frame interval (captures full cycle
+    // including glfwPollEvents, DWM vsync blocking, profiler overhead, etc.)
+    if (frame_started_) {
+        frame_time_ms_ = std::chrono::duration<double, std::milli>(now - frame_start_).count();
+        frame_rolling_.push(frame_time_ms_);
+        frame_time_avg_ = frame_rolling_.avg;
+        fps_ = (frame_time_avg_ > 0.0) ? 1000.0 / frame_time_avg_ : 0.0;
+    }
+
+    frame_start_ = now;
+    frame_started_ = true;
 }
 
 void Benchmark::frame_end() {
-    auto now = Clock::now();
-    frame_time_ms_ = std::chrono::duration<double, std::milli>(now - frame_start_).count();
-
-    frame_rolling_.push(frame_time_ms_);
-    frame_time_avg_ = frame_rolling_.avg;
-    fps_ = (frame_time_avg_ > 0.0) ? 1000.0 / frame_time_avg_ : 0.0;
-
     if (log_file_.is_open()) {
         write_log_row();
     }

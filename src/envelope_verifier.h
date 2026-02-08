@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <unordered_set>
 #include <vector>
 
 struct EnvelopeResult {
@@ -29,10 +28,10 @@ public:
 private:
     static uint32_t pack_pair(int16_t lo, int16_t hi);
     static void build_window_set(const int16_t* period_buf, size_t period_len,
-                                  size_t window_size, std::unordered_set<uint32_t>& out);
+                                  size_t window_size, std::vector<uint32_t>& out);
 
-    std::unordered_set<uint32_t> set_floor_;
-    std::unordered_set<uint32_t> set_ceil_;
+    std::vector<uint32_t> set_floor_;
+    std::vector<uint32_t> set_ceil_;
     size_t win_floor_ = 0;
     size_t win_ceil_ = 0;
     bool ready_ = false;

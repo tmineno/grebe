@@ -11,6 +11,7 @@ struct CliOptions {
     size_t ring_size = 67'108'864;  // 64M samples
     uint32_t num_channels = 1;
     uint32_t block_size = 16384;    // IPC block size (samples/channel/frame)
+    bool no_vsync = false;          // --no-vsync: disable V-Sync
 };
 
 // Returns 0 on success, non-zero on error (caller should exit with that code).

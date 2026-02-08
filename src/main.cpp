@@ -135,6 +135,15 @@ int main(int argc, char* argv[]) {
         Renderer renderer;
         renderer.init(ctx, swapchain, SHADER_DIR);
 
+        // Apply --no-vsync if requested
+        if (opts.no_vsync) {
+            swapchain.set_vsync(false);
+            swapchain.recreate(ctx, static_cast<uint32_t>(fb_width),
+                               static_cast<uint32_t>(fb_height));
+            renderer.on_swapchain_recreated(ctx, swapchain);
+            spdlog::info("V-Sync disabled via --no-vsync");
+        }
+
         // Bench mode: run microbenchmarks and exit (no grebe-sg needed)
         if (opts.enable_bench) {
             swapchain.set_vsync(false);

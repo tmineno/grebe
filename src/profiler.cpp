@@ -70,12 +70,15 @@ double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint3
         size_t period_len = data_gen_->period_length(ch);
         if (!period_buf || period_len == 0) continue;
 
-        // Rebuild verifier tables if bucket dimensions changed
+        // Build verifier tables once per scenario (at first measurement frame).
+        // Verifiers are cleared at scenario start; rebuild only when not ready.
+        // The ±1 LSB tolerance + floor/ceil dual sets handle frame-to-frame
+        // bucket size variation without needing per-frame rebuilds.
         size_t floor_bs = static_cast<size_t>(ch_raw) / num_buckets;
         size_t ceil_bs = (static_cast<size_t>(ch_raw) + num_buckets - 1) / num_buckets;
 
         auto& verifier = envelope_verifiers_[ch];
-        if (floor_bs != verifier.win_floor() || ceil_bs != verifier.win_ceil() || !verifier.is_ready()) {
+        if (!verifier.is_ready()) {
             verifier.rebuild(period_buf, period_len, floor_bs, ceil_bs);
         }
 
@@ -167,7 +170,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
 
         // Extract per-metric vectors and compute stats
         std::vector<double> v_frame, v_drain, v_dec, v_upload, v_swap, v_render;
-        std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_fps, v_coverage;
+        std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_coverage;
         std::vector<double> v_envelope;
 
         for (const auto& s : current_samples_) {
@@ -181,15 +184,17 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
             v_vtx.push_back(static_cast<double>(s.vertex_count));
             v_rate.push_back(s.data_rate);
             v_ring.push_back(s.ring_fill);
-            v_fps.push_back(s.frame_time_ms > 0.0 ? 1000.0 / s.frame_time_ms : 0.0);
             v_coverage.push_back(s.window_coverage);
             if (s.envelope_match_rate >= 0.0) {
                 v_envelope.push_back(s.envelope_match_rate);
             }
         }
 
-        result.fps               = compute_stats(v_fps);
+        // Derive FPS from frame_ms using harmonic mean relationship.
+        // avg(1000/x) is mathematically incorrect (Jensen's inequality);
+        // correct FPS = 1000 / avg(frame_ms).
         result.frame_ms          = compute_stats(v_frame);
+        result.fps               = derive_fps_stats(v_frame);
         result.drain_ms          = compute_stats(v_drain);
         result.decimate_ms       = compute_stats(v_dec);
         result.upload_ms         = compute_stats(v_upload);
@@ -250,6 +255,43 @@ MetricStats ProfileRunner::compute_stats(const std::vector<double>& values) {
     stats.p50 = percentile(0.50);
     stats.p95 = percentile(0.95);
     stats.p99 = percentile(0.99);
+
+    return stats;
+}
+
+MetricStats ProfileRunner::derive_fps_stats(const std::vector<double>& frame_ms_values) {
+    MetricStats stats;
+    if (frame_ms_values.empty()) return stats;
+
+    std::vector<double> sorted = frame_ms_values;
+    std::sort(sorted.begin(), sorted.end());
+
+    // FPS avg = 1000 / avg(frame_ms) — harmonic mean
+    double sum = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+    double avg_ms = sum / static_cast<double>(sorted.size());
+    stats.avg = (avg_ms > 0.0) ? 1000.0 / avg_ms : 0.0;
+
+    // min FPS from max frame_ms (slowest frame), max FPS from min frame_ms
+    stats.min = (sorted.back() > 0.0) ? 1000.0 / sorted.back() : 0.0;
+    stats.max = (sorted.front() > 0.0) ? 1000.0 / sorted.front() : 0.0;
+
+    // FPS percentile p_k = 1000 / frame_ms percentile p_{1-k}
+    // (monotonic decreasing transform inverts percentile rank)
+    auto percentile_ms = [&](double p) -> double {
+        double idx = p * static_cast<double>(sorted.size() - 1);
+        size_t lo = static_cast<size_t>(idx);
+        size_t hi = std::min(lo + 1, sorted.size() - 1);
+        double frac = idx - static_cast<double>(lo);
+        return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
+    };
+
+    double ms_p50 = percentile_ms(0.50);
+    double ms_p05 = percentile_ms(0.05);
+    double ms_p01 = percentile_ms(0.01);
+
+    stats.p50 = (ms_p50 > 0.0) ? 1000.0 / ms_p50 : 0.0;
+    stats.p95 = (ms_p05 > 0.0) ? 1000.0 / ms_p05 : 0.0;
+    stats.p99 = (ms_p01 > 0.0) ? 1000.0 / ms_p01 : 0.0;
 
     return stats;
 }
