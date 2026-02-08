@@ -179,13 +179,31 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 **受入条件:**
 - [x] Embedded 1ch × 全レート: envelope 一致率 100%
 - [x] Embedded 4ch × 全レート: envelope 一致率 100%
-- [ ] Windows MSVC Release でも同等の結果
+- [ ] Windows MSVC Release でも同等の結果 — Linux 検証完了、Windows は未検証（環境依存要素なく低リスク）
+
+---
+
+## 次期マイルストーン候補（優先度順）
+
+### Phase 12: E2E レイテンシ計測（NFR-02 検証）
+
+**目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
+**リスク:** 低（計測コード追加が主、既存動作への影響なし）
+**優先度:** **高** — PoC 要件定義 (NFR-02) の唯一の未検証項目。低複雑度で PoC 完了度を大きく向上。
+
+- [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
+- [ ] HUD に E2E latency 表示追加
+- [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
+- [ ] Embedded / IPC 両モードでの計測・比較
+- [ ] TI-11 に計測結果と分析を記録
+
+**受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
 
 ### Phase 11d: IPC モード Envelope 検証
 
 **目標:** IPC モードで envelope 検証を有効化し、drop なしレート (≤100 MSPS) で envelope 一致率 100% を達成する。高レート (≥1 GSPS) では SG drops 影響下での定量 baseline を記録する。
 **リスク:** 低〜中（波形生成ロジック共通化 + profiler 拡張）
-**優先度:** 中 — Phase 11c (Embedded 精度改善) 完了後に着手。
+**優先度:** **中** — Phase 11 の残課題。IPC モードの品質証明を完結させる。
 
 **背景:**
 現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。grebe プロセスに period buffer が存在しないことが根本原因。TI-10 のボトルネック分析で 3 層の課題を特定:
@@ -196,12 +214,11 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 **アプローチ:**
 - SignalConfigV2 の waveform type + sample_rate_hz から period buffer を grebe 側で再構築
 - 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
-- 理論 bucket サイズ構築 (Phase 11c の成果を流用)
+- Phase 11c の lazy-caching verifier をそのまま流用
 - 高レートでは SG drops 考慮の許容 match rate 閾値を設定
 
 - [ ] 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
 - [ ] IPC モード profiler で SignalConfigV2 から period buffer を再構築
-- [ ] 理論 bucket サイズ構築を IPC モードに適用
 - [ ] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
 - [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録
 - [ ] SG drops 影響下での許容 match rate 閾値定義
@@ -212,23 +229,21 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 - IPC 1ch/4ch × 1 GSPS: envelope 定量計測値が JSON に記録され、TI-10 に分析が含まれる
 - `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される（-1.0 ではない）
 
----
+### Phase 13.5: 回帰検証マトリクス
 
-## 次期マイルストーン候補（優先度順）
+**目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
+**リスク:** 低（計測スクリプト追加が主）
+**優先度:** **中高** — Phase 13 の前に配置。回帰防止インフラは改善の前に整備すべき。
+**出典:** TI-08-Codex-Review §Suggested Validation Matrix
 
-### Phase 12: E2E レイテンシ計測（NFR-02 検証）
+- [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
+  - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
+  - メトリクス: FPS, viewer drops, SG drops, smp/f, envelope match, E2E latency (Phase 12 後)
+  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, envelope 100% (Embedded), SG drops 比率安定 (IPC)
+- [ ] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
+- [ ] 初回実行、以後各フェーズ完了時に実行
 
-**目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
-**リスク:** 低（計測コード追加が主、既存動作への影響なし）
-**優先度:** 高 — PoC 要件定義 (NFR-02) の未検証項目。
-
-- [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
-- [ ] HUD に E2E latency 表示追加
-- [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
-- [ ] Embedded / IPC 両モードでの計測・比較
-- [ ] TI-11 に計測結果と分析を記録
-
-**受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
+**受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。
 
 ### Phase 13: IPC 堅牢性向上（選択的実装）
 
@@ -243,27 +258,11 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 **受入条件:** CRC 不一致フレーム破棄が動作。1 時間連続実行でリーク/ハング/クラッシュなし。
 
-### Phase 13.5: 回帰検証マトリクス
-
-**目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
-**リスク:** 低（計測スクリプト追加が主）
-**優先度:** 中 — Phase 13 以降の各フェーズ完了時に実行し、意図しない劣化を早期検知。
-**出典:** TI-08-Codex-Review §Suggested Validation Matrix
-
-- [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
-  - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
-  - メトリクス: FPS, viewer drops, SG drops, smp/f, envelope match, E2E latency (Phase 12 後)
-  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, envelope 100% (Embedded), SG drops 比率安定 (IPC)
-- [ ] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
-- [ ] Phase 13 完了後に初回実行、以後各フェーズ完了時に実行
-
-**受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。
-
 ### Phase 14: DataSource 抽象化 + トランスポートシミュレータ
 
 **目標:** データソースの pluggable 抽象化を導入し、帯域制限/遅延注入可能なシミュレータバックエンドで外部 I/F 評価を可能にする。
 **リスク:** 低〜中（Transport 抽象 I/F は Phase 8 で導入済み）
-**優先度:** 中 — 製品化判断に有用。DataSource 抽象化は将来デバイス統合の前提条件。
+**優先度:** 低 — 製品化判断に有用だが、PoC としての必要性は低い。
 **出典:** TI-08-Codex-Review §Architecture Direction
 
 - [ ] `DataSource` 抽象 I/F 導入（`Synthetic` / 将来 `PCIe` / `USB3` のプラグイン境界）
@@ -327,7 +326,6 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 ### 優先度中
 
-- IPC モードでの envelope 検証（Phase 11d で対応予定。波形生成ロジック共通化 + SignalConfigV2 ベース period buffer 再構築）
 - AVX2 MinMax 最適化（SSE2 → AVX2, 処理幅 8→16 倍増。ただし現行 21x マージンで必要性低）
 - SG-side pre-decimation（pipe 前に間引き → 帯域要求 ~1000x 削減、TI-09 施策 B）
 

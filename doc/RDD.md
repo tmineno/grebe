@@ -1,6 +1,6 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.5.0
+**バージョン:** 1.6.0
 **最終更新:** 2026-02-08
 
 ---
@@ -29,6 +29,10 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 - 独立マイクロベンチマーク (BM-A, B, C, E)
 - ウィンドウ/UI（波形表示 + ImGui メトリクス HUD）
 - Windows ネイティブ MSVC ビルド（WSL2 経由）
+- 実行バイナリ分離: `grebe` (可視化) / `grebe-sg` (信号生成)、anonymous pipe IPC
+- `grebe` から `grebe-sg` の子プロセス自動起動 + `--embedded` in-process モード
+- SG 専用 UI（レート / 波形 / ブロック長 / Pause）と Main 可視化 UI の責務分離
+- 波形表示整合性検証（envelope 100%、sequence continuity、window coverage）
 
 **本PoCに含まないもの:**
 - 実デバイス（ADC/FPGA）との接続
@@ -36,12 +40,11 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 - 本格的な UI/UX（メニュー、設定画面等）
 - ネットワーク経由のデータ受信
 
-**次期マイルストーン（本書で要件化、実装はこれから）:**
-- 実行バイナリの分離: `grebe` (可視化メイン) / `grebe-sg` (信号生成)
-- `grebe` から `grebe-sg` の自動起動（デフォルト）と attach モード
-- SG 専用 UI（チャンネル設定）と Main 可視化 UI の責務分離
-- Shared Memory (`memcpy`) ベース IPC と外部I/F評価向けトランスポート抽象化
-- フェーズ境界ごとに必ず runnable な 2 プロセス系を維持（分離だけで通信不能な中間状態を作らない）
+**延期・将来マイルストーン:**
+- Shared Memory IPC（TI-08 で延期判定。pipe transport で PoC 要件充足）
+- `--attach-sg` attach モード（既存 `grebe-sg` への接続。現在は spawn + `--embedded` のみ）
+- Trigger 機構（internal/external/timer — Phase 15+ scope）
+- E2E レイテンシ定量計測（Phase 12 scope）
 
 ---
 
@@ -86,12 +89,12 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 ### 3.1 パイプライン全体像
 
 ```
-┌──────────────────────────────┐          Control + Data (IPC)         ┌───────────────────────────────────┐
+┌──────────────────────────────┐     Anonymous Pipe (stdout/stdin)     ┌───────────────────────────────────┐
 │        grebe-sg プロセス      │ ─────────────────────────────────────▶ │            grebe プロセス          │
-│     (Signal Generator UI)    │                                       │        (Visualization UI)         │
+│     (Signal Generator UI)    │      FrameHeaderV2 + payload          │        (Visualization UI)         │
 │                              │ ◀───────────────────────────────────── │                                   │
-│  [SG UI]                     │          Status / backpressure         │  [IPC 受信]                        │
-│   ├─ global sample rate      │                                       │   ├─ Shared memory dequeue        │
+│  [SG UI]                     │          IpcCommand (control)          │  [IPC 受信]                        │
+│   ├─ global sample rate      │                                       │   ├─ pipe read → local ring buffer│
 │   └─ per-ch waveform/length  │                                       │   └─ sequence/timestamp validation│
 │                              │                                       │  [間引きスレッド]                  │
 │  [データ生成スレッド]          │                                       │   └─ MinMax/LTTB                  │
@@ -100,45 +103,103 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 └──────────────────────────────┘                                       └───────────────────────────────────┘
 ```
 
+**注:** `--embedded` モードでは grebe-sg を起動せず、grebe プロセス内で DataGenerator を直接実行する。
+
 ### 3.2 コンポーネント構成
 
 ```
 grebe/
 ├── src/
-│   ├── app_grebe/                # 可視化メイン実行バイナリ (grebe)
-│   │   ├── main.cpp              # エントリポイント、SG起動/attach制御
-│   │   ├── vulkan_context.*      # Vulkan 初期化・デバイス管理
-│   │   ├── swapchain.*           # スワップチェーン管理
-│   │   ├── renderer.*            # 描画パイプライン
-│   │   ├── buffer_manager.*      # Triple-buffered upload
-│   │   ├── decimator.*           # 間引きアルゴリズム
-│   │   ├── decimation_thread.*   # 間引きワーカースレッド
-│   │   ├── benchmark.*           # テレメトリ収集
-│   │   └── hud.*                 # Main UI/HUD
-│   ├── app_grebe_sg/             # 信号生成実行バイナリ (grebe-sg)
-│   │   ├── main.cpp              # SG UI + 設定適用 (GLFW + OpenGL + ImGui)
-│   │   └── data_generator.*      # 合成データ生成
-│   ├── ipc/                      # プロセス間通信契約/実装
-│   │   ├── contracts.h           # SignalConfigV2, FrameHeaderV2 等
-│   │   ├── transport.h           # Producer/Consumer 抽象I/F
-│   │   └── shm_transport.*       # Shared memory (memcpy) 実装
-│   └── common/                   # 共有ユーティリティ (ring_buffer.h, types.h, time_utils.h など)
+│   ├── main.cpp                  # grebe エントリポイント (SG 起動 + IPC 受信 + app_loop)
+│   ├── sg_main.cpp               # grebe-sg エントリポイント (SG UI + sender thread)
+│   ├── app_loop.*                # メインループ (Vulkan render + profiler + HUD)
+│   ├── cli.*                     # CLI オプション解析
+│   ├── vulkan_context.*          # Vulkan 初期化・デバイス管理
+│   ├── swapchain.*               # スワップチェーン管理
+│   ├── renderer.*                # 描画パイプライン
+│   ├── buffer_manager.*          # Triple-buffered upload
+│   ├── decimator.*               # 間引きアルゴリズム (MinMax SIMD / LTTB)
+│   ├── decimation_thread.*       # 間引きワーカースレッド (マルチスレッド対応)
+│   ├── data_generator.*          # 合成データ生成
+│   ├── benchmark.*               # テレメトリ収集
+│   ├── profiler.*                # 自動プロファイリング (envelope 検証含む)
+│   ├── envelope_verifier.*       # 波形整合性検証 (sliding-window min/max)
+│   ├── hud.*                     # Main UI/HUD
+│   ├── microbench.*              # 独立マイクロベンチマーク
+│   ├── compute_decimator.*       # GPU Compute Shader 間引き (実験)
+│   ├── ring_buffer.h             # Lock-free SPSC ring buffer
+│   ├── ring_buffer_view.h        # Raw pointer 抽象化
+│   ├── drop_counter.h            # Per-channel drop/backpressure 計測
+│   ├── app_command.*             # Command DTO + AppCommandQueue
+│   ├── process_handle.*          # Cross-platform プロセス管理
+│   └── ipc/                      # プロセス間通信
+│       ├── contracts.h           # FrameHeaderV2, IpcCommand
+│       ├── transport.h           # ITransportProducer / ITransportConsumer 抽象 I/F
+│       ├── pipe_transport.*      # Anonymous pipe 実装
+│       └── (shm_transport.*)     # Shared memory 実装 (延期マイルストーン)
 ├── shaders/
 ├── doc/
 └── scripts/
 ```
 
-**実装方針メモ:**
-- `src/` の大規模ディレクトリ移動は高リスクのため、ロジック変更と分離せず独立コミットで実施する
-- フェーズ初期は既存配置を維持したまま 2 プロセス化を優先し、段階的に再配置してよい
+### 3.3 IPC プロトコル仕様
 
-### 3.3 IPC プロトコル仕様 (v2)
+#### 現行実装: Anonymous Pipe Transport
 
-`grebe-sg` (producer) と `grebe` (consumer) は Shared Memory 上の
-**ControlBlockV2 + ConsumerStatusBlockV2 + DataRingV2** で通信する。
-本仕様は単一バージョン運用とし、後方互換は考慮しない。
+`grebe` は `grebe-sg` を子プロセスとして起動し、stdin/stdout を anonymous pipe で接続する。
 
-#### 3.3.1 共有メモリオブジェクト
+- **Data (SG → Main):** `FrameHeaderV2` + channel-major payload を stdout 経由で送出
+- **Control (Main → SG):** `IpcCommand` を stdin 経由で送信（SET_SAMPLE_RATE / TOGGLE_PAUSED / QUIT）
+- **Transport 抽象 I/F:** `ITransportProducer` / `ITransportConsumer` (`src/ipc/transport.h`) で実装を切り離し可能
+
+#### 3.3.1 FrameHeaderV2 (実装準拠)
+
+```c
+struct FrameHeaderV2 {
+    uint32_t magic;                 // 'GFH2' (0x32484647)
+    uint32_t header_bytes;          // = sizeof(FrameHeaderV2)
+    uint64_t sequence;              // 単調増加
+    uint64_t producer_ts_ns;
+    uint32_t channel_count;
+    uint32_t block_length_samples;  // samples per channel
+    uint32_t payload_bytes;         // = channel_count * block_length_samples * sizeof(int16_t)
+    uint32_t header_crc32c;         // プレースホルダ (Phase 13 で実装予定)
+    double   sample_rate_hz;        // SG 権限のレート (grebe-sg → grebe 自動同期)
+    uint64_t sg_drops_total;        // SG 側累積ドロップ
+    uint64_t first_sample_index;    // 各チャンネルの先頭サンプル絶対インデックス
+    // payload: [ch0][ch1]...[chN-1] (channel-major, int16_t)
+};
+```
+
+#### 3.3.2 IpcCommand (Main → SG)
+
+```c
+struct IpcCommand {
+    enum Type : uint32_t {
+        SET_SAMPLE_RATE = 1,
+        TOGGLE_PAUSED   = 2,
+        QUIT            = 3,
+    };
+    uint32_t magic;   // 'GIC2' (0x32434947)
+    uint32_t type;
+    double   value;   // SET_SAMPLE_RATE 時のみ使用
+};
+```
+
+既定値:
+- `block_length_samples = 16384` (CLI: `--block-size`, 1024〜65536)
+- `sequence gap 許容 = 0` (gap は drop として記録)
+
+#### 延期マイルストーン: Shared Memory IPC 設計メモ
+
+> 以下は TI-08 で延期判定された Shared Memory IPC の設計メモである。
+> ボトルネックが pipe transport ではなく消費側にあること、および Embedded モードで 0-drops が達成済みであることから、PoC では anonymous pipe で十分と判断された。
+> 再開トリガーは TODO.md「延期マイルストーン」を参照。
+
+<details>
+<summary>Shared Memory IPC 仕様 (未実装)</summary>
+
+**共有メモリオブジェクト:**
 
 | 名称 | 既定名 | 用途 | 読み書き |
 |---|---|---|---|
@@ -146,7 +207,7 @@ grebe/
 | ConsumerStatusBlockV2 | `grebe-ipc-cons` | credit window / consumer heartbeat / read progress | Main 書き込み, SG 読み取り |
 | DataRingV2 | `grebe-ipc-data-<generation>` | フレームデータ本体リング | SG 書き込み, Main 読み取り |
 
-#### 3.3.2 制御ブロック/状態ブロック
+**制御ブロック/状態ブロック:**
 
 ```c
 struct SignalConfigV2 {
@@ -194,102 +255,34 @@ struct ConsumerStatusBlockV2 {
 };
 ```
 
-#### 3.3.3 DataRingV2 frame header
+**フロー制御:** credit-based window (drop-new policy)。**ハンドシェイク:** generation-based attach/reattach。詳細は v1.5.0 以前の本文書を参照。
 
-```c
-struct FrameHeaderV2 {
-    uint32_t version;               // = 2
-    uint32_t header_bytes;
-    uint64_t generation;
-    uint64_t sequence;              // 単調増加
-    uint64_t producer_ts_ns;
-    uint32_t stream_id;             // v2では0固定
-    uint32_t flags;                 // bit0=CONFIG_BOUNDARY, bit1=DROPPED_PRIOR
-    uint32_t channel_count;
-    uint32_t block_length_samples;
-    uint32_t payload_bytes;
-    uint32_t header_crc32c;         // 必須
-    uint32_t payload_crc32c;        // feature_flagsで有効時のみ
-    uint32_t reserved;
-    // payload: [ch0][ch1]...[chN-1] (channel-major)
-};
-```
-
-v2 既定値:
-- `block_length_samples = 65536`
-- `slot_count = 64`
-- `sequence gap 許容 = 0` (gap は drop として記録)
-
-#### 3.3.4 フロー制御/通知/同期
-
-- credit-based window を必須とする:
-  - `inflight = write_sequence - read_sequence`
-  - `inflight < credits_granted` の場合のみ producer は publish 可能
-- credit 枯渇時の方針は **drop-new**（loss-tolerant realtime）
-- 同期:
-  - SG は payload 完了後 header 確定、最後に write index を release publish
-  - Main は acquire load 後に header CRC 検証、問題なければ payload を読む
-- 通知:
-  - 必須: poll mode
-  - 任意: `doorbell_event`（eventfd/OS event）を `feature_flags` で有効化
-
-#### 3.3.5 ハンドシェイク/状態遷移
-
-1. SG 起動:
-- `generation` 採番
-- DataRingV2 作成
-- ControlBlockV2 更新 (`ready=1`)
-
-2. Main auto-spawn/attach:
-- `grebe-ipc-ctrl` を読んで `ring_desc`/`active_config`/`generation` を取得
-- `grebe-ipc-cons` を初期化 (`credits_granted` 設定)
-- DataRingV2 attach
-
-3. 異常/復帰:
-- child モード: プロセス終了検知で degraded
-- attach モード: heartbeat timeout で degraded
-- generation 更新検出で reattach
-
-4. cleanup:
-- SG は旧 `grebe-ipc-data-<generation>` を unlink/close
-- Main は旧セグメントを detach し best-effort cleanup
-
-#### 3.3.6 タイムアウト/しきい値 (v2 既定値)
-
-| 項目 | 既定値 |
-|---|---|
-| producer heartbeat 更新周期 | 100 ms |
-| consumer heartbeat 更新周期 | 100 ms |
-| heartbeat timeout 判定 | 500 ms |
-| attach 初期待機タイムアウト | 5 s |
-| block_length_samples | 65536 |
-| slot_count | 64 |
-| 初期 credits_granted | 32 |
+</details>
 
 ### 3.4 標準I/Fとの対応
 
-| 観点 | 本IPC(v2) | 参照パターン |
-|---|---|---|
-| データリング | 固定長 descriptor-like ring | AF_XDP/DPDK |
-| 制御/データ分離 | ControlBlock + DataRing 分離 | Aeron |
-| フロー制御 | credit window | PCIe/NVMe queue depth |
-| 通知 | poll + optional doorbell | NVMe/xHCI |
-| 信頼性 | loss-tolerant realtime + drop accounting | UDP realtime profile |
+| 観点 | 現行 (pipe) | 将来 (shm) | 参照パターン |
+|---|---|---|---|
+| データ搬送 | anonymous pipe (stdin/stdout) | 固定長 descriptor-like ring | AF_XDP/DPDK |
+| 制御/データ分離 | IpcCommand 別チャネル | ControlBlock + DataRing 分離 | Aeron |
+| フロー制御 | pipe backpressure (OS) | credit window | PCIe/NVMe queue depth |
+| 通知 | blocking read | poll + optional doorbell | NVMe/xHCI |
+| 信頼性 | loss-tolerant (SG drops 計測) | loss-tolerant + drop accounting | UDP realtime profile |
 
 ### 3.5 同期整合性とトリガベース捕捉（SG/Main 両側）
 
 表示波形が入力信号を忠実に再現していることを保証するため、
 `grebe-sg` と `grebe` の双方で同期・検証機構を実装する。
 
-#### PoC 必須（Phase 11 scope）
+#### PoC 実装済み（Phase 11/11c）
 
 - SG 側:
   - periodic timer による固定周期 capture window でデータを送出する
-  - 各フレームに capture window 境界（開始/終了タイムスタンプ、サンプル数）を付与する
+  - 各フレームに capture window 境界（`first_sample_index`、`sg_drops_total`）を付与する
 - Main 側:
-  - sequence continuity を検証し、フレーム欠落を検知する
-  - window coverage（capture window 充足率）を品質指標として継続監視する
-  - 既知合成信号に対する envelope 検証を `--profile` に統合する
+  - sequence continuity を検証し、フレーム欠落を検知する（IPC: FrameHeaderV2.sequence、Embedded: DropCounter）
+  - window coverage（capture window 充足率）を品質指標として継続監視する（HUD + `--profile` JSON）
+  - 既知合成信号に対する envelope 検証を `--profile` に統合する（Phase 11c: lazy-caching verifier, Embedded 全レート 100%）
 
 #### 製品拡張（Phase 15+ scope）
 
@@ -372,11 +365,14 @@ v2 既定値:
 | Swap Time | ms | バッファ切替時間 |
 | Render Time | ms | 描画実行時間 |
 | Samples/Frame | count | フレームあたりの入力サンプル数 |
-| Trigger Mode | enum | internal / external / timer |
-| Trigger Lock | bool | trigger成立状態（armed/locked） |
-| Frame Validity | enum / % | valid/invalid と valid frame 比率 |
 | Window Coverage | % | capture window 充足率 |
+| Seq Gaps | count | IPC sequence gap 検知数 |
+| Viewer Drops | count | viewer 側リングバッファドロップ累計 |
 | SG Drops | count | SG 側で発生した累積ドロップ |
+| Envelope Match | % | 既知信号 envelope 一致率 (`--profile` 時) |
+| Trigger Mode | enum | internal / external / timer — **Phase 15+ scope** |
+| Trigger Lock | bool | trigger成立状態 — **Phase 15+ scope** |
+| Frame Validity | enum / % | valid/invalid と valid frame 比率 — **Phase 15+ scope** |
 
 ### FR-07: マルチチャンネル表示
 
@@ -390,62 +386,56 @@ v2 既定値:
 
 - **FR-08.1:** 可視化メインを `grebe`、信号生成を `grebe-sg` の別実行バイナリとして提供する
 - **FR-08.2:** `grebe` はデフォルトで `grebe-sg` を子プロセスとして自動起動する
-- **FR-08.3:** 既存 `grebe-sg` へ接続する attach モードを提供する
-- **FR-08.4:** `grebe-sg` の停止・再起動を `grebe` が検知し、復帰可能にする
-  - child モード: プロセスハンドル監視（wait/poll）
-  - attach モード: heartbeat timeout 監視
-  - 共有メモリの stale データ判定に generation counter を用いる
+- **FR-08.3:** 既存 `grebe-sg` へ接続する attach モード (`--attach-sg`) — **将来拡張** (shm 実装が前提)
+- **FR-08.4:** `grebe-sg` の停止検知と復帰
+  - child モード: pipe EOF 検知
+  - attach モード/heartbeat 監視 — **将来拡張** (shm scope)
 - **FR-08.5:** 可視化UIに信号生成設定UIを持ち込まず、責務分離を維持する
-- **FR-08.6:** Phase 8 で `grebe` + `grebe-sg` の最小E2E動作（接続・表示）を必須とする
-  - production Shared Memory 前でも、stub/暫定 transport で runnable を満たす
+- **FR-08.6:** `grebe` + `grebe-sg` の E2E 動作を必須とする
+- **FR-08.7:** `--embedded` フラグで in-process DataGenerator モードを提供する
 
 ### FR-09: SG UI とチャンネル設定モデル
 
-- **FR-09.1:** SG UI は専用ウィンドウで動作する
-- **FR-09.1a:** SG UI 描画バックエンドは `GLFW + OpenGL + ImGui` を採用する（Vulkan は不要）
+- **FR-09.1:** SG UI は専用ウィンドウで動作する（headless fallback 付き）
+- **FR-09.1a:** SG UI 描画バックエンドは `GLFW + OpenGL + ImGui` を採用する
 - **FR-09.2:** チャンネル数は 1-8 をサポートする
-- **FR-09.3:** サンプルレートはグローバル設定（全チャンネル共通）とする
+- **FR-09.3:** サンプルレートはグローバル設定（全チャンネル共通）とする（`FrameHeaderV2.sample_rate_hz` で grebe に自動同期）
 - **FR-09.4:** 各チャンネルごとに modulation/waveform を独立設定可能にする
-- **FR-09.5:** data length (block length) は初期実装で全チャンネル共通値とする（固定長フレーミング）
+- **FR-09.5:** data length (block length) は全チャンネル共通値とする（固定長フレーミング、`--block-size` で指定）
 - **FR-09.6:** 各チャンネル独立の可変 data length は拡張要件として後続フェーズで扱う
-- **FR-09.7:** SG 側に trigger mode 設定を追加する（internal / external / periodic timer）
-- **FR-09.8:** internal trigger は level/edge（rising/falling/both）を設定可能にする
-- **FR-09.9:** SG 側は trigger をサンプル生成クロックで判定し、capture window 境界を IPC で通知する
-- **FR-09.10:** external trigger 未入力時は periodic timer へフォールバック可能にする（設定で有効/無効）
+- **FR-09.7:** SG 側に trigger mode 設定を追加する（internal / external / periodic timer） — **Phase 15+ scope**
+- **FR-09.8:** internal trigger は level/edge（rising/falling/both）を設定可能にする — **Phase 15+ scope**
+- **FR-09.9:** SG 側は trigger をサンプル生成クロックで判定し、capture window 境界を IPC で通知する — **Phase 15+ scope**
+- **FR-09.10:** external trigger 未入力時は periodic timer へフォールバック可能にする — **Phase 15+ scope**
 
 ### FR-10: トランスポート抽象化と計測
 
-- **FR-10.1:** `grebe-sg` → `grebe` のデータ搬送は抽象 I/F 経由で実装する
+- **FR-10.1:** `grebe-sg` → `grebe` のデータ搬送は抽象 I/F 経由で実装する（`ITransportProducer`/`ITransportConsumer`）
 - **FR-10.2:** 初期実装は anonymous pipe とする（Shared memory は延期マイルストーン）
-- **FR-10.3:** 外部インターフェース帯域/遅延評価のため、将来的な代替バックエンドを差し替え可能にする
-- **FR-10.4:** attach/discovery 用に `ControlBlockV2` (`grebe-ipc-ctrl`) を定義する
-  - `SignalConfigV2`
-  - `DataRingDescV2`
-  - producer heartbeat
-  - generation
-- **FR-10.5:** consumer 状態共有用に `ConsumerStatusBlockV2` (`grebe-ipc-cons`) を定義する
-  - `read_sequence`
-  - `credits_granted`
-  - consumer heartbeat
-- **FR-10.6:** フロー制御は credit-based window を必須とする
-- **FR-10.7:** 信頼性プロファイルは loss-tolerant realtime とし、credit 枯渇時は drop-new とする
-- **FR-10.8:** `FrameHeaderV2` の `header_crc32c` 検証を必須とする
-- **FR-10.9:** 初期実装時点で最低限の transport 指標（throughput, drop rate, enqueue/dequeue, inflight depth, credits utilization）を計測する
-- **FR-10.10:** E2E timestamp delta と `--profile` JSON/CSV 統合は後続フェーズで追加する
-- **FR-10.11:** config 更新は generation bump 経由のみ許可し、in-place config 書き換えは行わない
-- **FR-10.12:** trigger/capture 境界メタデータ（trigger mode, trigger ts, capture boundary）を伝搬可能にする
+- **FR-10.3:** 外部インターフェース帯域/遅延評価のため、代替バックエンドを差し替え可能にする
+- **FR-10.4:** attach/discovery 用 `ControlBlockV2` — **延期** (shm 実装時に対応)
+- **FR-10.5:** consumer 状態共有用 `ConsumerStatusBlockV2` — **延期** (shm 実装時に対応)
+- **FR-10.6:** credit-based window フロー制御 — **延期** (現行 pipe は OS backpressure に依存)
+- **FR-10.7:** 信頼性プロファイルは loss-tolerant realtime とし、SG 側 drops を計測・記録する
+- **FR-10.8:** `FrameHeaderV2.header_crc32c` 検証 — **Phase 13 scope** (現在プレースホルダ)
+- **FR-10.9:** transport 指標計測（drop rate, samples/frame, SG drops）。inflight depth/credits は **延期** (shm scope)
+- **FR-10.10:** E2E timestamp delta — **Phase 12 scope**
+- **FR-10.11:** config 更新は `IpcCommand` 経由のみ許可する
+- **FR-10.12:** trigger/capture 境界メタデータ — **Phase 15+ scope**
 
 ### FR-11: フレーム有効性判定と波形整合性
 
 - **FR-11.1:** Main 側で frame validity 判定を必須化する（valid / invalid）
+  - sequence gap + drop 検知で実装。CRC ベースの per-frame valid/invalid 判定は **Phase 13+ scope**
 - **FR-11.2:** validity 判定条件として以下を最低限含める
   - sequence continuity（欠落検知）
-  - CRC 検証（header/payload）
-  - capture window 充足率（不足時 invalid）
+  - CRC 検証（header/payload） — **Phase 13 scope** (header_crc32c はプレースホルダ)
+  - capture window 充足率
 - **FR-11.3:** invalid frame は HUD/ログ/プロファイルで明示し、silent success を禁止する
+  - drops/seq_gaps は HUD 表示。per-frame valid/invalid フラグは **Phase 13+ scope**
 - **FR-11.4:** 波形整合性メトリクスを段階的に導入する
-  - **PoC tier（Phase 11）:** window coverage ratio、valid frame ratio、既知信号 envelope 検証（MinMax 出力 vs 理論 envelope、±1 LSB 許容）
-  - **PoC tier 改善（Phase 11c）:** 理論バケットサイズ構築による envelope 検証精度向上。`bucket_size = sample_rate / target_fps / num_buckets` で verifier テーブルを事前構築し、高レート (1 GSPS) × 多チャンネル (4ch) で envelope 一致率 100% を達成する
+  - **PoC tier（Phase 11）:** window coverage ratio、既知信号 envelope 検証（MinMax 出力 vs 理論 envelope、±1 LSB 許容）
+  - **PoC tier 改善（Phase 11c）:** lazy-caching envelope verifier。実フレームの `ch_raw` から bucket size を算出し、per-bucket-size で valid pair set を on-demand build + cache。高レート (1 GSPS) × 多チャンネル (4ch) で envelope 一致率 100% 達成
   - **Product tier（将来）:** Embedded/IPC 比較 envelope mismatch rate、peak miss rate、extremum amplitude error（p50/p95/p99）
 - **FR-11.5:** viewer drops と SG drops を別系統で記録し、品質判定に反映する
 
@@ -482,7 +472,7 @@ v2 既定値:
 
 - 既知合成信号に対する envelope 一致検証を `--profile` で自動実行する
   - Embedded モード: envelope 一致率 100%（±1 LSB）を全レート・全チャンネル構成で必須とする
-  - 高レート (≥100 MSPS) では理論バケットサイズ (`sample_rate / target_fps / num_buckets`) に基づく verifier テーブル構築で検証精度を保証する
+  - 高レート (≥100 MSPS) では lazy-caching verifier（実フレーム ch_raw から bucket size を算出、per-bucket-size on-demand build + cache）で検証精度を保証する
   - IPC モード: SG-side drops に応じた乖離を定量計測し、TI-10 で評価する
 - sequence continuity（フレーム欠落なし）を検証する
   - Embedded モード: 欠落 0 を必須とする
@@ -494,7 +484,7 @@ v2 既定値:
 
 ### NFR-03: メモリ使用量
 
-- Ring buffer サイズ: デフォルト 16M samples (32 MB)、1 GSPS 時 64M+ 推奨
+- Ring buffer サイズ: デフォルト 64M samples (128 MB)、`--ring-size` で変更可能
 - GPU Staging Buffer: 3面 × 描画頂点数分（数十KB程度）
 - VRAM 総使用量: 512 MB 以下
 - IPC DataRing (v2) は `block_length_samples=65536`, `slot_count=64` を基準とし、
@@ -513,12 +503,12 @@ v2 既定値:
 
 ### NFR-06: IPC 安定性
 
-- `grebe-sg` の異常終了時、`grebe` はクラッシュせず状態を degraded 表示して待機する
-- `grebe-sg` の再起動後、`grebe` は再接続して描画を再開できる
-- プロセス境界導入後も 1時間連続実行でリーク/ハングがないこと
-- 固定長フレーミングでの共有メモリリングは sequence 欠落を検知できること
-- credit window 制御下で producer/consumer がデッドロックしないこと
-- header CRC 異常を確実に検出し、破損フレームを破棄できること
+- `grebe-sg` の異常終了時、`grebe` はクラッシュせず pipe EOF を検知して停止する
+- `grebe-sg` の再起動後の自動再接続 — **将来拡張**
+- 1時間連続実行でリーク/ハングがないこと — **Phase 13 scope** (未検証)
+- sequence 欠落を検知できること
+- credit window 制御下で producer/consumer がデッドロックしないこと — **延期** (shm scope)
+- header CRC 異常を確実に検出し、破損フレームを破棄できること — **Phase 13 scope**
 
 ---
 
@@ -534,6 +524,10 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | TI-04 | 描画プリミティブ | LINE_STRIP 3840 vtx → 2,022 FPS (34x 余裕)。**十分** |
 | TI-05 | 永続マップドバッファ | **検証不可** (dzn は ReBAR 非対応)。現行設計で優先度低 |
 | TI-06 | スレッドモデル | 3 スレッド + lock-free SPSC が最適。ring_fill <0.3% @ 1 GSPS |
+| TI-07 | IPC パイプ帯域と欠落率 | Windows ネイティブ ~100-470 MB/s (最適化後)。shm 延期判定 |
+| TI-08 | IPC ボトルネック再評価 | ボトルネックは pipe ではなくパイプライン (cache cold + ring drain)。マルチスレッド間引きで 0-drops 達成 |
+| TI-09 | SG-side drop 評価 | IPC 4ch×1G で SG drops ~37%。可視化品質に影響なし (MinMax 3840 vtx/ch 不変)。**PoC 許容** |
+| TI-10 | 波形表示整合性検証 | Embedded 全レート envelope 100%。lazy-caching verifier で高レート対応。**検証完了** |
 
 ---
 
@@ -553,34 +547,31 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 
 ### CLI オプション (`grebe`)
 
-| オプション | 説明 |
-|---|---|
-| `--log` | CSV テレメトリを `./tmp/` に出力 |
-| `--profile` | 自動プロファイリング実行、JSON レポート出力 |
-| `--bench` | 独立マイクロベンチマーク実行、JSON 出力 |
-| `--ring-size=<N>[K\|M\|G]` | Ring buffer サイズ指定（デフォルト 16M） |
-| `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
-| `--attach-sg` | `grebe-sg` を自動起動せず既存プロセスへ接続 |
-| `--sg-path=<path>` | 自動起動時に使用する `grebe-sg` 実行ファイルパス |
-| `--transport=<name>` | トランスポート実装選択（現時点 `pipe`。`shared_mem` は延期。将来拡張予約） |
-| `--trigger-mode=<internal\|external\|timer>` | 捕捉モード指定（デフォルト: timer） |
-| `--pre-trigger=<samples>` | pre-trigger サンプル数 |
-| `--post-trigger=<samples>` | post-trigger サンプル数 |
-| `--timer-period-ms=<ms>` | periodic timer 捕捉周期 |
+| オプション | 説明 | 実装状況 |
+|---|---|---|
+| `--log` | CSV テレメトリを `./tmp/` に出力 | 実装済み |
+| `--profile` | 自動プロファイリング実行、JSON レポート出力 | 実装済み |
+| `--bench` | 独立マイクロベンチマーク実行、JSON 出力 | 実装済み |
+| `--embedded` | grebe-sg を起動せず in-process DataGenerator を使用 | 実装済み |
+| `--ring-size=<N>[K\|M\|G]` | Ring buffer サイズ指定（デフォルト 64M） | 実装済み |
+| `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） | 実装済み |
+| `--block-size=N` | IPC ブロックサイズ (1024〜65536, 2冪, デフォルト 16384) | 実装済み |
+| `--no-vsync` | V-Sync 無効化 | 実装済み |
+| `--attach-sg` | `grebe-sg` を自動起動せず既存プロセスへ接続 | 将来拡張 |
+| `--sg-path=<path>` | 自動起動時に使用する `grebe-sg` パス | 将来拡張 |
+| `--transport=<name>` | トランスポート実装選択 | 将来拡張 |
+| `--trigger-mode=...` | 捕捉モード指定 | Phase 15+ |
 
 ### CLI オプション (`grebe-sg`)
 
-| オプション | 説明 |
-|---|---|
-| `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） |
-| `--sample-rate=<Hz>` | グローバルサンプルレート初期値 |
-| `--transport=<name>` | トランスポート実装選択（現時点 `pipe`。`shared_mem` は延期。将来拡張予約） |
-| `--segment-name=<name>` | IPC 共有メモリ名（shm 実装時に使用） |
-| `--trigger-mode=<internal\|external\|timer>` | SG 側 trigger モード |
-| `--trigger-level=<int16>` | internal trigger 閾値 |
-| `--trigger-edge=<rising\|falling\|both>` | internal trigger エッジ条件 |
-| `--timer-period-ms=<ms>` | timer trigger 周期 |
-| `--ext-trigger-source=<name>` | external trigger 入力源（将来拡張予約） |
+| オプション | 説明 | 実装状況 |
+|---|---|---|
+| `--channels=N` | チャンネル数指定（デフォルト 1, 最大 8） | 実装済み |
+| `--sample-rate=<Hz>` | グローバルサンプルレート初期値 | 実装済み |
+| `--ring-size=<N>[K\|M\|G]` | Ring buffer サイズ指定 | 実装済み |
+| `--block-size=N` | IPC ブロックサイズ | 実装済み |
+| `--transport=<name>` | トランスポート実装選択 | 将来拡張 |
+| `--trigger-*` | Trigger 関連オプション | Phase 15+ |
 
 ---
 
@@ -592,7 +583,7 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | プロファイルレポート | JSON | 4シナリオの自動計測結果 |
 | マイクロベンチマーク結果 | JSON | BM-A/B/C/E の計測値 |
 | テレメトリログ | CSV | フレーム単位の詳細計測値 |
-| 技術的判断メモ | Markdown | TI-01〜06 への回答と推奨事項 |
+| 技術的判断メモ | Markdown | TI-01〜10 への回答と推奨事項 |
 
 ---
 
@@ -605,9 +596,10 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | Vulkan 初期化の複雑さ | 全体遅延 | **緩和済み**: vk-bootstrap 活用 |
 | GPU ベンダー間の挙動差 | 再現性低下 | **検証済み**: RTX 5080 で複数環境動作確認 |
 | LTTB が高レートで追いつかない | 描画落ち | **対策済み**: ≥100 MSPS で自動無効化 |
-| 親子プロセス管理の複雑化 | 起動失敗/孤児プロセス | **要対策**: spawn/attach 両経路の状態遷移を明文化 |
-| IPC 同期不整合（seq 欠落、再接続） | データ欠損/停止 | **要対策**: sequence + timestamp + timeout/reconnect |
-| トリガ未ロック/誤トリガ | 無効波形表示 | **要対策**: SG側trigger判定 + Main側validity判定 + timer fallback |
+| 親子プロセス管理の複雑化 | 起動失敗/孤児プロセス | **緩和済み**: spawn_with_pipes + pipe EOF 検知。attach モードは将来拡張 |
+| IPC 同期不整合（seq 欠落、再接続） | データ欠損/停止 | **緩和済み**: sequence continuity 検証 + drop 計測 (TI-09/10) |
+| トリガ未ロック/誤トリガ | 無効波形表示 | **Phase 15+ scope**: 現行は periodic timer のみ |
+| Pipe IPC 帯域上限 | 高レート SG drops | **PoC 許容**: SG drops は可視化品質に影響なし (TI-09)。shm は延期 |
 
 ---
 
