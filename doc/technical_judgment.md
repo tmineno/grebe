@@ -772,7 +772,7 @@ SG drops を定量計測するため、以下の変更を実施:
 
 4. **FPS への影響**: IPC 4ch×1G の FPS (55.7) は Embedded (58.7) と比較して 5% 低下。pipe 読み出しのオーバーヘッドによるもので、SG drops とは無関係。
 
-**結論: SG drops は PoC の可視化品質に実質的影響なし。** MinMax デシメーション後の出力は SG drops の有無に関わらず 3,840 vtx/ch で同一。
+**結論: 現行の PoC 計測メトリクス (頂点数、FPS、smp/f) において、SG drops による有意な可視化品質劣化は観測されていない。** MinMax デシメーション後の出力は SG drops の有無に関わらず 3,840 vtx/ch で同一であり、これは品質維持の必要条件を満たす。ただし、頂点数の不変は十分条件ではなく、波形忠実度の厳密な検証 (Embedded 基準との envelope 比較、ピーク見逃し率等) は製品化フェーズの課題として残る。
 
 **緩和策マトリクス**
 
@@ -810,7 +810,7 @@ SG drops を定量計測するため、以下の変更を実施:
 | ~~R-08~~ | ~~マルチスレッド間引き~~ | ~~中~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~std::barrier + worker threads。4ch/8ch×1G 0-drops 達成。decimate_ms 18ms→0.3ms (40-80x)~~ |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
 | ~~R-10~~ | ~~ネイティブ Vulkan ドライバ検証~~ | ~~高~~ | ~~完了~~ | ~~Phase 7~~ | ~~MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS~~ |
-| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: ボトルネックが transport ではなく消費側 (ring drain + cache cold) のため投資対効果低。Embedded でも同水準 drops |
+| R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: viewer 側ボトルネックは transport ではなく消費側 → Phase 10-3 で解消。TI-09: SG 側 drops は pipe 帯域限界が原因だが可視化品質影響なし。shm は製品化フェーズで施策 B+F と併せて検討 |
 | ~~R-12~~ | ~~Windows IPC コマンドチャネル実装~~ | ~~中~~ | ~~完了~~ | ~~Phase 9~~ | ~~`PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作~~ |
 | ~~R-13~~ | ~~Release ビルドでの計測標準化~~ | ~~高~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト~~ |
 | R-14 | SG-side drop 緩和策 (バックプレッシャ or pre-decimation) | 低 | PoC 許容 | — | TI-09: SG drops は可視化品質に影響なし。製品化フェーズで施策 B+F を検討 |
