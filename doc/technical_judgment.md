@@ -710,16 +710,16 @@ WSL2 Release:
 
 | # | 推奨事項 | 優先度 | ステータス | 対応Phase | 備考 |
 |---|---|---|---|---|---|
-| R-01 | 実 GPU 環境での再計測 | 高 | 完了 | Phase 6-7 | dzn (Phase 6) + ネイティブ Vulkan (Phase 7) で全ベンチマーク計測済み |
-| R-02 | マルチチャンネル対応 (4ch/8ch) | 高 | 完了 | Phase 5 | FR-07 実装済み (fb21264, 387c6fd) |
-| R-03 | LTTB の高レート無効化 | 高 | 完了 | Phase 5 | FR-02.6 実装済み (effective_mode_ パターン) |
+| ~~R-01~~ | ~~実 GPU 環境での再計測~~ | ~~高~~ | ~~完了~~ | ~~Phase 6-7~~ | ~~dzn (Phase 6) + ネイティブ Vulkan (Phase 7) で全ベンチマーク計測済み~~ |
+| ~~R-02~~ | ~~マルチチャンネル対応 (4ch/8ch)~~ | ~~高~~ | ~~完了~~ | ~~Phase 5~~ | ~~FR-07 実装済み (fb21264, 387c6fd)~~ |
+| ~~R-03~~ | ~~LTTB の高レート無効化~~ | ~~高~~ | ~~完了~~ | ~~Phase 5~~ | ~~FR-02.6 実装済み (effective_mode_ パターン)~~ |
 | R-04 | AVX2 MinMax 最適化 | 中 | 未着手 | — | Release ビルドで 21x マージン → 優先度低下 |
-| R-05 | ReBAR/SAM 永続マップド検証 | 低 | 見送り | — | dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照) |
-| R-06 | GPU Compute 間引きの実GPU再検証 | 中 | 完了 | Phase 6 | CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03) |
+| ~~R-05~~ | ~~ReBAR/SAM 永続マップド検証~~ | ~~低~~ | ~~見送り~~ | ~~—~~ | ~~dzn 非対応 + 現設計で恩恵皆無 (TI-05 参照)~~ |
+| ~~R-06~~ | ~~GPU Compute 間引きの実GPU再検証~~ | ~~中~~ | ~~完了~~ | ~~Phase 6~~ | ~~CPU SIMD 7.1x 高速 → CPU 間引き最適を再確認 (TI-03)~~ |
 | R-07 | E2E レイテンシ計測 | 低 | 未着手 | — | NFR-02 検証 |
-| R-08 | マルチスレッド間引き | 中 | 完了 | Phase 10-3 | std::barrier + worker threads。4ch/8ch×1G 0-drops 達成。decimate_ms 18ms→0.3ms (40-80x) |
+| ~~R-08~~ | ~~マルチスレッド間引き~~ | ~~中~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~std::barrier + worker threads。4ch/8ch×1G 0-drops 達成。decimate_ms 18ms→0.3ms (40-80x)~~ |
 | R-09 | 代替描画プリミティブ | 低 | 未着手 | — | Instanced Quad 等 |
-| R-10 | ネイティブ Vulkan ドライバ検証 | 高 | 完了 | Phase 7 | MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS |
+| ~~R-10~~ | ~~ネイティブ Vulkan ドライバ検証~~ | ~~高~~ | ~~完了~~ | ~~Phase 7~~ | ~~MSVC + NVIDIA ネイティブで dzn 比 2.6x、L3=2,022 FPS~~ |
 | R-11 | Shared Memory IPC への移行検討 | 低 | 延期 | — | TI-08: ボトルネックが transport ではなく消費側 (ring drain + cache cold) のため投資対効果低。Embedded でも同水準 drops |
-| R-12 | Windows IPC コマンドチャネル実装 | 中 | 完了 | Phase 9 | `PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作 |
-| R-13 | Release ビルドでの計測標準化 | 高 | 完了 | Phase 10-3 | Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト |
+| ~~R-12~~ | ~~Windows IPC コマンドチャネル実装~~ | ~~中~~ | ~~完了~~ | ~~Phase 9~~ | ~~`PeekNamedPipe` による非ブロッキング実装。IPC `--profile` レート変更が Windows で動作~~ |
+| ~~R-13~~ | ~~Release ビルドでの計測標準化~~ | ~~高~~ | ~~完了~~ | ~~Phase 10-3~~ | ~~Debug ビルドで --profile/--bench 実行時に警告表示。リング 16M→64M デフォルト~~ |
