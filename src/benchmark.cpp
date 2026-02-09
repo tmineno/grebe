@@ -95,6 +95,12 @@ void Benchmark::set_ring_fill(double ratio) {
     ring_fill_ = ratio;
 }
 
+void Benchmark::set_e2e_latency(double ms) {
+    e2e_raw_ = ms;
+    e2e_rolling_.push(ms);
+    e2e_avg_ = e2e_rolling_.avg;
+}
+
 bool Benchmark::start_logging(const std::string& path) {
     log_file_.open(path, std::ios::out | std::ios::trunc);
     if (!log_file_.is_open()) {
@@ -108,7 +114,7 @@ bool Benchmark::start_logging(const std::string& path) {
 
     // CSV header
     log_file_ << "frame,time_s,frame_ms,fps,drain_ms,decimate_ms,upload_ms,swap_ms,render_ms,"
-                 "samples,vtx,decimate_ratio,data_rate,ring_fill\n";
+                 "samples,vtx,decimate_ratio,data_rate,ring_fill,e2e_ms\n";
 
     spdlog::info("Telemetry logging started: {}", path);
     return true;
@@ -126,11 +132,12 @@ void Benchmark::write_log_row() {
     // CSV row (every frame)
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-                  "%lu,%.4f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.1f,%.0f,%.3f\n",
+                  "%lu,%.4f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.1f,%.0f,%.3f,%.2f\n",
                   static_cast<unsigned long>(log_frame_), time_s,
                   frame_time_ms_, fps_,
                   drain_raw_, decimate_raw_, upload_raw_, swap_raw_, render_raw_,
-                  samples_raw_, vtx_raw_, decimate_ratio_raw_, data_rate_, ring_fill_);
+                  samples_raw_, vtx_raw_, decimate_ratio_raw_, data_rate_, ring_fill_,
+                  e2e_raw_);
     log_file_ << buf;
 
     // Stdout summary (throttled to ~1 Hz: every 60 frames)

@@ -35,22 +35,35 @@ bool ProfileRunner::should_continue() const {
 }
 
 void ProfileRunner::init_envelope_verifiers() {
-    if (!data_gen_ || envelope_verifiers_initialized_) return;
+    if (envelope_verifiers_initialized_) return;
 
     envelope_verifiers_.resize(channel_count_);
 
-    for (uint32_t ch = 0; ch < channel_count_; ch++) {
-        // Skip non-periodic waveforms
-        WaveformType wf = data_gen_->get_channel_waveform(ch);
-        if (wf == WaveformType::WhiteNoise || wf == WaveformType::Chirp) {
-            continue;
+    if (data_gen_) {
+        // Embedded mode: read period buffers from DataGenerator
+        for (uint32_t ch = 0; ch < channel_count_; ch++) {
+            WaveformType wf = data_gen_->get_channel_waveform(ch);
+            if (wf == WaveformType::WhiteNoise || wf == WaveformType::Chirp) {
+                continue;
+            }
+
+            const int16_t* period_buf = data_gen_->period_buffer_ptr(ch);
+            size_t period_len = data_gen_->period_length(ch);
+            if (!period_buf || period_len == 0) continue;
+
+            envelope_verifiers_[ch].set_period(period_buf, period_len);
         }
-
-        const int16_t* period_buf = data_gen_->period_buffer_ptr(ch);
-        size_t period_len = data_gen_->period_length(ch);
-        if (!period_buf || period_len == 0) continue;
-
-        envelope_verifiers_[ch].set_period(period_buf, period_len);
+    } else {
+        // IPC mode: generate period buffers locally (Sine waveform assumed for --profile)
+        double sample_rate = scenarios_[current_scenario_].sample_rate;
+        ipc_period_buffers_.resize(channel_count_);
+        for (uint32_t ch = 0; ch < channel_count_; ch++) {
+            ipc_period_buffers_[ch] = waveform_utils::generate_sine_period(
+                sample_rate, ch, channel_count_);
+            envelope_verifiers_[ch].set_period(
+                ipc_period_buffers_[ch].data(),
+                ipc_period_buffers_[ch].size());
+        }
     }
 
     envelope_verifiers_initialized_ = true;
@@ -59,8 +72,8 @@ void ProfileRunner::init_envelope_verifiers() {
 double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
                                                   uint32_t raw_samples, DecimationMode dec_mode,
                                                   const std::vector<uint32_t>* per_ch_raw) {
-    // Only verify MinMax mode with periodic waveforms and embedded DataGenerator
-    if (!data_gen_ || dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
+    // Only verify MinMax mode with valid data
+    if (dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
         return -1.0;
     }
     if (!per_ch_raw || per_ch_raw->empty()) return -1.0;
@@ -100,6 +113,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              double data_rate, double ring_fill,
                              uint64_t total_drops, uint64_t sg_drops,
                              uint64_t seq_gaps, uint32_t raw_samples,
+                             double e2e_latency_ms,
                              AppCommandQueue& cmd_queue,
                              const int16_t* frame_data,
                              uint32_t per_ch_vtx,
@@ -139,6 +153,14 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         init_envelope_verifiers();
     }
 
+    // Pre-warm envelope cache during warmup (discard results).
+    // build_window_set() is expensive (~10ms at 1 GSPS period_len=333K);
+    // running verification during warmup populates the cache so measurement
+    // frames don't suffer cold-cache spikes.
+    if (in_warmup && envelope_verifiers_initialized_ && frame_data && per_ch_vtx > 0) {
+        run_envelope_verification(frame_data, per_ch_vtx, raw_samples, dec_mode, per_ch_raw);
+    }
+
     // Collect metrics during measurement phase
     if (!in_warmup) {
         FrameSample sample;
@@ -158,6 +180,8 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         double frame_ms = bench.frame_time_ms();
         double expected = (frame_ms > 0.0) ? (scenario.sample_rate * frame_ms / 1000.0) : 0.0;
         sample.window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
+
+        sample.e2e_latency_ms = e2e_latency_ms;
 
         // Envelope verification
         if (frame_data && per_ch_vtx > 0) {
@@ -180,6 +204,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         std::vector<double> v_frame, v_drain, v_dec, v_upload, v_swap, v_render;
         std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_coverage;
         std::vector<double> v_envelope;
+        std::vector<double> v_e2e;
 
         for (const auto& s : current_samples_) {
             v_frame.push_back(s.frame_time_ms);
@@ -195,6 +220,9 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
             v_coverage.push_back(s.window_coverage);
             if (s.envelope_match_rate >= 0.0) {
                 v_envelope.push_back(s.envelope_match_rate);
+            }
+            if (s.e2e_latency_ms > 0.0) {
+                v_e2e.push_back(s.e2e_latency_ms);
             }
         }
 
@@ -214,6 +242,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         result.ring_fill         = compute_stats(v_ring);
         result.window_coverage   = compute_stats(v_coverage);
         result.envelope_match_rate = compute_stats(v_envelope);
+        result.e2e_latency_ms      = compute_stats(v_e2e);
 
         result.drop_total = total_drops - drops_at_start_;
         result.sg_drop_total = sg_drops - sg_drops_at_start_;
@@ -316,14 +345,14 @@ int ProfileRunner::generate_report() const {
 
     // Stdout report
     spdlog::info("========== PROFILE REPORT ==========");
-    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8}",
+    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
                  "Scenario", "FPS avg", "FPS min", "FPS p95",
                  "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Drops",
-                 "WinCov%", "Env%", "Result");
-    spdlog::info("{}", std::string(132, '-'));
+                 "WinCov%", "Env%", "E2E ms", "Result");
+    spdlog::info("{}", std::string(142, '-'));
 
     for (const auto& r : results_) {
-        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>7.1f}% {:>7.1f}% {:>8}",
+        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>7.1f}% {:>7.1f}% {:>8.1f} {:>8}",
                      r.config.name,
                      r.fps.avg, r.fps.min, r.fps.p95,
                      r.frame_ms.avg, r.render_ms.avg,
@@ -331,6 +360,7 @@ int ProfileRunner::generate_report() const {
                      r.drop_total,
                      r.window_coverage.avg * 100.0,
                      r.envelope_match_rate.avg * 100.0,
+                     r.e2e_latency_ms.avg,
                      r.pass ? "PASS" : "FAIL");
         if (!r.pass) overall_pass = false;
     }
@@ -367,6 +397,7 @@ int ProfileRunner::generate_report() const {
             {"ring_fill",         stats_to_json(r.ring_fill)},
             {"window_coverage",   stats_to_json(r.window_coverage)},
             {"envelope_match_rate", stats_to_json(r.envelope_match_rate)},
+            {"e2e_latency_ms",     stats_to_json(r.e2e_latency_ms)},
         };
         s["drop_total"] = r.drop_total;
         s["sg_drop_total"] = r.sg_drop_total;

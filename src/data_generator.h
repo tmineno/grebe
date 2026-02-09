@@ -51,6 +51,7 @@ public:
     double target_frequency() const { return target_frequency_.load(std::memory_order_relaxed); }
     double actual_sample_rate() const { return actual_rate_.load(std::memory_order_relaxed); }
     uint64_t total_samples_generated() const { return total_samples_.load(std::memory_order_relaxed); }
+    uint64_t last_push_ts_ns() const { return last_push_ts_ns_.load(std::memory_order_relaxed); }
 
     void set_drop_counters(std::vector<DropCounter*> counters);
 
@@ -97,4 +98,5 @@ private:
     std::array<std::atomic<WaveformType>, MAX_CHANNELS> channel_waveforms_;
     std::atomic<double> actual_rate_{0.0};
     std::atomic<uint64_t> total_samples_{0};
+    std::atomic<uint64_t> last_push_ts_ns_{0};
 };

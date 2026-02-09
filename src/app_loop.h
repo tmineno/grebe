@@ -41,6 +41,7 @@ struct AppComponents {
     std::atomic<bool>   current_paused{false};
     std::atomic<uint64_t> sg_drops_total{0};       // SG-side drops (IPC only)
     std::atomic<uint64_t> seq_gaps{0};              // IPC sequence gaps (cumulative)
+    std::atomic<uint64_t> latest_producer_ts_ns{0}; // latest producer timestamp (IPC only)
 };
 
 void run_main_loop(AppComponents& app);

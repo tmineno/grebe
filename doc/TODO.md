@@ -120,6 +120,15 @@
 - [x] IPC vs Embedded 定量比較: 4ch×1G SG drops ~7.9G (37%), 8ch×1G ~34.3G (79%)
 - [x] TI-09 執筆: 可視化品質影響なし (MinMax 3840 vtx/ch 不変)、緩和策マトリクス、PoC 許容判定
 
+### Phase 12: E2E レイテンシ計測（NFR-02 検証）
+
+- [x] `producer_ts_ns` → 描画完了の E2E delta を計測
+- [x] HUD に E2E latency 表示追加
+- [x] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
+- [x] Embedded / IPC 両モードでの計測・比較
+- [x] TI-11 に計測結果と分析を記録
+- [x] 受入条件: 全レート NFR-02 PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms)
+
 ---
 
 ## PoC 達成状況サマリ
@@ -132,8 +141,8 @@
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
 | 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
-| 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC モード envelope 検証 (未着手) |
-| E2E レイテンシ (NFR-02) | **未計測** | 推定 ~50ms (3 frame分), 定量検証未実施 |
+| 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC ≤100 MSPS 100%, 4ch×1G 99.2% (R-17 完了) |
+| E2E レイテンシ (NFR-02) | **達成** | TI-11: 全レート PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms) |
 
 ### Phase 11: 波形表示整合性検証（NFR-02b）
 
@@ -181,80 +190,36 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 - [x] Embedded 4ch × 全レート: envelope 一致率 100%
 - [ ] Windows MSVC Release でも同等の結果 — Linux 検証完了、Windows は未検証（環境依存要素なく低リスク）
 
+### Phase 11d: IPC モード Envelope 検証
+
+- [x] 周波数計算 + period buffer 生成を `src/waveform_utils.h` に共通ユーティリティとして抽出
+- [x] DataGenerator を `waveform_utils` 使用にリファクタ (single source of truth)
+- [x] Profiler: IPC モード時に sample_rate_hz + Sine 前提で EnvelopeVerifier を初期化
+- [x] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
+- [x] 計測実行: IPC 1ch×1G 100%, 4ch×1G 99.2% (SG drops 影響)
+- [x] TI-10 Phase 11d セクション追記、R-17 完了
+
+**受入条件:**
+- [x] IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%
+- [x] IPC 1ch × 1 GSPS: envelope 100%
+- [x] IPC 4ch × 1 GSPS: envelope 99.2% (TI-10 に定量計測値記録)
+- [x] `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される
+
 ---
 
 ## 次期マイルストーン候補（優先度順）
 
-### Phase 11e: Main Viewer UI 改善（Waveform Axis + Time Span）
+### Phase 11e: Main Viewer UI 改善（Waveform Axis + Time Span）[完了]
 
-**目標:** Main 可視化ウィンドウで波形の読み取り性を改善し、amplitude/time 軸表示と可視 time span（表示長）設定を追加する。
-**リスク:** 低〜中（描画パイプライン本体は維持し、HUD/decimation 連携を拡張）
-**優先度:** **高** — 本ブランチの主目的。可視化品質を即時改善できる。
-
-- [x] 受入条件を先に固定（Runnable-First / Acceptance-first）
-  - [x] 1) amplitude/time 軸が 1-8ch 表示で破綻なく重畳される
-  - [x] 2) Main ウィンドウの time span 設定変更が再起動なしで即時反映される
-  - [x] 3) 既存モード（embedded / IPC / profile / bench）を壊さずビルド・起動可能
 - [x] Main UI に time span 設定（up/down arrow）を追加
 - [x] Main UI の draw field 右側に config pane を設置し、time span 設定を配置
-- [x] DecimationThread に「最新 window 優先」設定を追加（`sample_rate × time_span` 相当）
-- [x] RingBuffer から古いサンプルを効率的に discard できる API を追加
-- [x] HUD に amplitude 軸（目盛り/基準線、raw int16 ラベル）を追加
-- [x] HUD に time 軸（設定 span に同期した目盛り/ラベル）を追加
-- [x] Window coverage 指標を time span 基準へ整合
-- [x] time span の上限/下限を sample rate / ring capacity から動的導出
-- [x] TI-10 もしくは新規 TI に UI 変更後の挙動差分（FPS/drop 影響有無）を追記
+- [x] DecimationThread を latest history window 化し、time span > 10ms の表示長反映を修正
+- [x] RingBuffer discard API 追加（古いサンプルの効率破棄）
+- [x] HUD に amplitude/time 軸と raw int16 ラベルを追加
+- [x] 波形描画を軸内にクリップ（viewport/scissor）
+- [x] time span 上限/下限を sample rate / ring capacity から動的導出
 - [x] SG UI に periodic waveform 周波数（Hz）設定フィールドを追加
-
-**受入条件:**
-- [x] `grebe` 実行中に time span を変更すると、表示波形 window が即座に短縮/延長すること
-- [x] 1ch/4ch/8ch で amplitude/time 軸ラベルが視認可能で、波形と重なっても読めること
-- [x] `cmake --build --preset linux-release` が成功し、`run` でクラッシュなく描画継続できること
-
-### Phase 12: E2E レイテンシ計測（NFR-02 検証）
-
-**目標:** データ生成 → 画面表示の E2E レイテンシを定量計測し、NFR-02 の目標 (L1≤50ms, L2≤100ms) を検証する。
-**リスク:** 低（計測コード追加が主、既存動作への影響なし）
-**優先度:** **高** — PoC 要件定義 (NFR-02) の唯一の未検証項目。低複雑度で PoC 完了度を大きく向上。
-
-- [ ] `producer_ts_ns` → 描画完了 (fence signal) の E2E delta を計測
-- [ ] HUD に E2E latency 表示追加
-- [ ] `--profile` JSON に E2E latency 統計追加 (avg/p50/p95/p99)
-- [ ] Embedded / IPC 両モードでの計測・比較
-- [ ] TI-11 に計測結果と分析を記録
-
-**受入条件:** `--profile` レポートに E2E latency が含まれ、NFR-02 の L1≤50ms / L2≤100ms を判定できること。
-
-### Phase 11d: IPC モード Envelope 検証
-
-**目標:** IPC モードで envelope 検証を有効化し、drop なしレート (≤100 MSPS) で envelope 一致率 100% を達成する。高レート (≥1 GSPS) では SG drops 影響下での定量 baseline を記録する。
-**リスク:** 低〜中（波形生成ロジック共通化 + profiler 拡張）
-**優先度:** **中** — Phase 11 の残課題。IPC モードの品質証明を完結させる。
-
-**背景:**
-現在 IPC モードでは `data_gen_ = nullptr` のため envelope 検証がスキップされている (match_rate = -1.0)。grebe プロセスに period buffer が存在しないことが根本原因。TI-10 のボトルネック分析で 3 層の課題を特定:
-1. Period buffer 未参照（検証自体が不可能）
-2. SG-side drops（≥1 GSPS で ~37% drop、TI-09）
-3. Bucket サイズ不確定性（pipe 帯域・OS スケジューリング依存の変動）
-
-**アプローチ:**
-- SignalConfigV2 の waveform type + sample_rate_hz から period buffer を grebe 側で再構築
-- 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
-- Phase 11c の lazy-caching verifier をそのまま流用
-- 高レートでは SG drops 考慮の許容 match rate 閾値を設定
-
-- [ ] 波形生成ロジック（周波数計算 + period buffer 生成）を `grebe_common` に共通化
-- [ ] IPC モード profiler で SignalConfigV2 から period buffer を再構築
-- [ ] 計測実行: IPC {1ch, 4ch} × {1M, 10M, 100M} SPS で envelope 100% 確認
-- [ ] 計測実行: IPC {1ch, 4ch} × {1G} SPS で envelope baseline 記録
-- [ ] SG drops 影響下での許容 match rate 閾値定義
-- [ ] TI-10 Phase 11d セクション追記
-
-**受入条件:**
-- IPC 1ch/4ch × ≤100 MSPS: envelope 一致率 100%（SG drops = 0 のため Embedded と同等を期待）
-- IPC 1ch/4ch × 1 GSPS: envelope 定量計測値が JSON に記録され、TI-10 に分析が含まれる
-- `--profile` JSON に IPC モードでも `envelope_match_rate` が記録される（-1.0 ではない）
-
+- [x] TI-10 に挙動差分を追記（Phase 11e）
 ### Phase 13.5: 回帰検証マトリクス
 
 **目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。

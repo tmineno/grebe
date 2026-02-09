@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 
@@ -285,7 +286,8 @@ void run_main_loop(AppComponents& app) {
                                   window_coverage,
                                   visible_time_span_s,
                                   min_time_span_s,
-                                  max_time_span_s);
+                                  max_time_span_s,
+                                  app.benchmark->e2e_latency_avg());
 
         // Apply time-span adjustments requested by HUD arrow buttons
         int span_step = app.hud->consume_time_span_step_request();
@@ -303,6 +305,14 @@ void run_main_loop(AppComponents& app) {
                          max_time_span_s * 1e3);
         }
 
+        // Read producer timestamp before render
+        uint64_t producer_ts = 0;
+        if (app.data_gen) {
+            producer_ts = app.data_gen->last_push_ts_ns();
+        } else {
+            producer_ts = app.latest_producer_ts_ns.load(std::memory_order_relaxed);
+        }
+
         // Render (timed)
         t0 = Benchmark::now();
         auto hud_region = app.hud->waveform_region();
@@ -316,6 +326,16 @@ void run_main_loop(AppComponents& app) {
                                            channel_pcs.data(), app.num_channels,
                                            &draw_region, app.hud);
         app.benchmark->set_render_time(Benchmark::elapsed_ms(t0));
+
+        // E2E latency: producer_ts → render completion
+        double e2e_ms = 0.0;
+        if (producer_ts > 0) {
+            auto now_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    Benchmark::Clock::now().time_since_epoch()).count());
+            e2e_ms = static_cast<double>(now_ns - producer_ts) / 1e6;
+        }
+        app.benchmark->set_e2e_latency(e2e_ms);
         if (!ok) {
             // Swapchain out of date — recreate
             int w, h;
@@ -338,6 +358,7 @@ void run_main_loop(AppComponents& app) {
                                    app.dec_thread->ring_fill_ratio(),
                                    total_drops, sg_drops,
                                    seq_gaps, raw_samples,
+                                   e2e_ms,
                                    *app.cmd_queue,
                                    frame_data.empty() ? nullptr : frame_data.data(),
                                    app.dec_thread->per_channel_vertex_count(),

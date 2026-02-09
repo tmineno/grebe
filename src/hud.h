@@ -42,7 +42,8 @@ public:
                           double window_coverage = 0.0,
                           double visible_time_span_s = 0.0,
                           double min_time_span_s = 0.0,
-                          double max_time_span_s = 0.0);
+                          double max_time_span_s = 0.0,
+                          double e2e_latency_ms = 0.0);
 
     // +1: up, -1: down, 0: no action
     int consume_time_span_step_request();

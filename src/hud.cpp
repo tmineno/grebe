@@ -127,7 +127,8 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                             uint64_t seq_gaps, double window_coverage,
                             double visible_time_span_s,
                             double min_time_span_s,
-                            double max_time_span_s) {
+                            double max_time_span_s,
+                            double e2e_latency_ms) {
     ImGuiIO& io = ImGui::GetIO();
     float bar_height = 44.0f;
     float screen_width = io.DisplaySize.x;
@@ -317,15 +318,16 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                     paused ? " | PAUSED" : "");
     }
 
-    // Line 2: per-phase telemetry + window coverage
-    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f | Span: %s | WCov: %.0f%%",
+    // Line 2: per-phase telemetry + visible span + window coverage + E2E latency
+    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f | Span: %s | WCov: %.0f%% | E2E: %.1f ms",
                 bench.drain_time_avg(),
                 bench.decimation_time_avg(), bench.decimation_ratio(),
                 bench.upload_time_avg(),
                 bench.swap_time_avg(), bench.render_time_avg(),
                 bench.samples_per_frame_avg(),
                 span_str,
-                window_coverage * 100.0);
+                window_coverage * 100.0,
+                e2e_latency_ms);
 
     ImGui::End();
 }
