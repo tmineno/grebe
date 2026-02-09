@@ -153,6 +153,14 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         init_envelope_verifiers();
     }
 
+    // Pre-warm envelope cache during warmup (discard results).
+    // build_window_set() is expensive (~10ms at 1 GSPS period_len=333K);
+    // running verification during warmup populates the cache so measurement
+    // frames don't suffer cold-cache spikes.
+    if (in_warmup && envelope_verifiers_initialized_ && frame_data && per_ch_vtx > 0) {
+        run_envelope_verification(frame_data, per_ch_vtx, raw_samples, dec_mode, per_ch_raw);
+    }
+
     // Collect metrics during measurement phase
     if (!in_warmup) {
         FrameSample sample;
