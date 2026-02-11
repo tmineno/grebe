@@ -312,9 +312,9 @@ void run_main_loop(AppComponents& app) {
             hud_region.width,
             hud_region.height
         };
-        bool ok = app.render_backend->draw_frame_with_hud(
+        bool ok = app.render_backend->draw_frame_with_overlay(
             channel_cmds.data(), app.num_channels,
-            &draw_region, app.hud);
+            &draw_region, [&](VkCommandBuffer cmd) { app.hud->render(cmd); });
         app.benchmark->set_render_time(Benchmark::elapsed_ms(t0));
 
         // E2E latency: producer_ts -> render completion

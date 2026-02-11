@@ -4,11 +4,11 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <functional>
 
 class VulkanContext;
 class Swapchain;
 class BufferManager;
-class Hud;
 
 struct DrawRegionPx {
     int32_t  x      = 0;
@@ -45,14 +45,16 @@ public:
 
     // Returns false if swapchain needs recreation
     // Multi-channel: draws N channels with per-channel push constants and firstVertex offsets
+    using OverlayCallback = std::function<void(VkCommandBuffer)>;
+
     bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
                     const WaveformPushConstants* channel_pcs, uint32_t num_channels,
-                    const DrawRegionPx* draw_region, Hud* hud = nullptr);
+                    const DrawRegionPx* draw_region, OverlayCallback overlay_cb = {});
 
     // Single-channel convenience overload
     bool draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
-                    const WaveformPushConstants& push_constants, Hud* hud = nullptr) {
-        return draw_frame(ctx, swapchain, buf_mgr, &push_constants, 1, nullptr, hud);
+                    const WaveformPushConstants& push_constants, OverlayCallback overlay_cb = {}) {
+        return draw_frame(ctx, swapchain, buf_mgr, &push_constants, 1, nullptr, std::move(overlay_cb));
     }
 
     void on_swapchain_recreated(VulkanContext& ctx, Swapchain& swapchain);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ring_buffer.h"
+#include "waveform_type.h"
 
 #include <array>
 #include <cstdint>
@@ -9,14 +10,6 @@
 #include <atomic>
 
 class DropCounter;
-
-enum class WaveformType {
-    Sine,
-    Square,
-    Sawtooth,
-    WhiteNoise,
-    Chirp
-};
 
 class DataGenerator {
 public:

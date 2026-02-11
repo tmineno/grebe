@@ -6,10 +6,10 @@
 #include "renderer.h"
 #include "buffer_manager.h"
 
+#include <functional>
 #include <string>
 
 struct GLFWwindow;
-class Hud;
 
 /// VulkanRenderer: IRenderBackend implementation wrapping the Vulkan pipeline.
 /// Owns VulkanContext, Swapchain, Renderer, and BufferManager.
@@ -35,9 +35,10 @@ public:
     bool vsync() const override;
     uint32_t vertex_count() const override;
 
-    // Vulkan-specific: draw frame with HUD overlay
-    bool draw_frame_with_hud(const grebe::DrawCommand* channels, uint32_t num_channels,
-                             const grebe::DrawRegion* region, Hud* hud);
+    // Vulkan-specific: draw frame with optional overlay (e.g. ImGui HUD)
+    using OverlayCallback = std::function<void(VkCommandBuffer)>;
+    bool draw_frame_with_overlay(const grebe::DrawCommand* channels, uint32_t num_channels,
+                                 const grebe::DrawRegion* region, OverlayCallback overlay_cb = {});
 
     // Vulkan-specific accessors (needed by HUD init, compute decimator, etc.)
     VulkanContext& vulkan_context() { return ctx_; }

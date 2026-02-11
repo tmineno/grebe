@@ -202,15 +202,11 @@ add_custom_target(compile_shaders DEPENDS ${SHADER_SPIRV_FILES})
 
 add_library(grebe STATIC
     # Core pipeline
-    src/app_command.cpp
     src/benchmark.cpp
     src/decimator.cpp
     src/data_generator.cpp
     src/decimation_thread.cpp
     src/decimation_engine.cpp
-    src/envelope_verifier.cpp
-    src/profiler.cpp
-    src/process_handle.cpp
     src/synthetic_source.cpp
     src/ipc_source.cpp
     src/ingestion_thread.cpp
@@ -220,7 +216,6 @@ add_library(grebe STATIC
     src/swapchain.cpp
     src/renderer.cpp
     src/buffer_manager.cpp
-    src/hud.cpp
     src/vulkan_renderer.cpp
     src/compute_decimator.cpp
     src/vma_impl.cpp
@@ -243,7 +238,6 @@ target_link_libraries(grebe PUBLIC
     GPUOpen::VulkanMemoryAllocator
     glm::glm
     stb_headers
-    imgui_lib
 )
 
 target_compile_definitions(grebe PUBLIC
@@ -267,13 +261,19 @@ add_executable(grebe-viewer
     apps/viewer/app_loop.cpp
     apps/viewer/cli.cpp
     apps/viewer/microbench.cpp
+    # App-only modules (moved from libgrebe)
+    apps/viewer/app_command.cpp
+    apps/viewer/hud.cpp
+    apps/viewer/profiler.cpp
+    apps/viewer/envelope_verifier.cpp
+    apps/viewer/process_handle.cpp
 )
 
 target_include_directories(grebe-viewer PRIVATE
     ${CMAKE_SOURCE_DIR}/apps/viewer
 )
 
-target_link_libraries(grebe-viewer PRIVATE grebe)
+target_link_libraries(grebe-viewer PRIVATE grebe imgui_lib)
 
 if(MSVC)
     target_compile_options(grebe-viewer PRIVATE /W4)

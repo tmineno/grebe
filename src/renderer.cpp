@@ -2,7 +2,6 @@
 #include "vulkan_context.h"
 #include "swapchain.h"
 #include "buffer_manager.h"
-#include "hud.h"
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -64,7 +63,7 @@ void Renderer::destroy() {
 
 bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManager& buf_mgr,
                           const WaveformPushConstants* channel_pcs, uint32_t num_channels,
-                          const DrawRegionPx* draw_region, Hud* hud) {
+                          const DrawRegionPx* draw_region, OverlayCallback overlay_cb) {
     // Wait for previous frame with this index to finish
     vkWaitForFences(ctx.device(), 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
 
@@ -157,9 +156,9 @@ bool Renderer::draw_frame(VulkanContext& ctx, Swapchain& swapchain, BufferManage
         }
     }
 
-    // Render HUD overlay (ImGui)
-    if (hud) {
-        hud->render(cmd);
+    // Render overlay (app-provided callback, e.g. ImGui HUD)
+    if (overlay_cb) {
+        overlay_cb(cmd);
     }
 
     vkCmdEndRenderPass(cmd);

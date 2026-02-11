@@ -1,5 +1,4 @@
 #include "vulkan_renderer.h"
-#include "hud.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
@@ -51,11 +50,11 @@ bool VulkanRenderer::swap_buffers() {
 
 bool VulkanRenderer::draw_frame(const grebe::DrawCommand* channels, uint32_t num_channels,
                                 const grebe::DrawRegion* region) {
-    return draw_frame_with_hud(channels, num_channels, region, nullptr);
+    return draw_frame_with_overlay(channels, num_channels, region);
 }
 
-bool VulkanRenderer::draw_frame_with_hud(const grebe::DrawCommand* channels, uint32_t num_channels,
-                                          const grebe::DrawRegion* region, Hud* hud) {
+bool VulkanRenderer::draw_frame_with_overlay(const grebe::DrawCommand* channels, uint32_t num_channels,
+                                              const grebe::DrawRegion* region, OverlayCallback overlay_cb) {
     // Convert DrawCommand[] → WaveformPushConstants[]
     std::vector<WaveformPushConstants> pcs(num_channels);
     for (uint32_t i = 0; i < num_channels; i++) {
@@ -84,7 +83,7 @@ bool VulkanRenderer::draw_frame_with_hud(const grebe::DrawCommand* channels, uin
 
     return renderer_.draw_frame(ctx_, swapchain_, buf_mgr_,
                                 pcs.data(), num_channels,
-                                region ? &draw_region : nullptr, hud);
+                                region ? &draw_region : nullptr, std::move(overlay_cb));
 }
 
 void VulkanRenderer::on_resize(uint32_t width, uint32_t height) {

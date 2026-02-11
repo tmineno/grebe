@@ -1,7 +1,7 @@
 #pragma once
 
 #include "grebe/data_source.h"
-#include "data_generator.h"  // for WaveformType enum
+#include "waveform_type.h"
 
 #include <array>
 #include <atomic>
