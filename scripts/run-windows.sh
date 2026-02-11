@@ -3,7 +3,7 @@
 set -euo pipefail
 
 WIN_BUILD_ROOT="${WIN_BUILD_ROOT:-/mnt/c/tmp/grebe}"
-EXE_PATH="${WIN_BUILD_ROOT}/build/grebe.exe"
+EXE_PATH="${WIN_BUILD_ROOT}/build/grebe-viewer.exe"
 
 if [ ! -f "${EXE_PATH}" ]; then
     echo "ERROR: Executable not found at ${EXE_PATH}" >&2

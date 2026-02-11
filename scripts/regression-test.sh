@@ -14,7 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="$PROJECT_DIR/build/grebe"
+BINARY="$PROJECT_DIR/build/grebe-viewer"
 TMP_DIR="$PROJECT_DIR/tmp"
 BASELINE_DIR="$TMP_DIR/regression_baseline"
 

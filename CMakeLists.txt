@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(grebe VERSION 0.1.0 LANGUAGES CXX C)
+project(grebe VERSION 2.0.0 LANGUAGES CXX C)
 
 # =============================================================================
 # Windows Cross-Build from WSL2
@@ -126,7 +126,7 @@ FetchContent_MakeAvailable(glfw vk-bootstrap VulkanMemoryAllocator glm spdlog js
 add_library(stb_headers INTERFACE)
 target_include_directories(stb_headers INTERFACE ${stb_SOURCE_DIR})
 
-# Dear ImGui library
+# Dear ImGui library (Vulkan backend)
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -197,12 +197,12 @@ endforeach()
 add_custom_target(compile_shaders DEPENDS ${SHADER_SPIRV_FILES})
 
 # =============================================================================
-# Common library (shared between grebe and future grebe-sg)
+# libgrebe — Core library
 # =============================================================================
 
-add_library(grebe_common STATIC
+add_library(grebe STATIC
+    # Core pipeline
     src/app_command.cpp
-    src/cli.cpp
     src/benchmark.cpp
     src/decimator.cpp
     src/data_generator.cpp
@@ -211,45 +211,27 @@ add_library(grebe_common STATIC
     src/profiler.cpp
     src/process_handle.cpp
     src/ipc/pipe_transport.cpp
-)
-
-target_include_directories(grebe_common PUBLIC
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/ipc
-)
-
-target_link_libraries(grebe_common PUBLIC
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-)
-
-if(MSVC)
-    target_compile_options(grebe_common PRIVATE /W4)
-else()
-    target_compile_options(grebe_common PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-# =============================================================================
-# Main executable
-# =============================================================================
-
-add_executable(grebe
-    src/main.cpp
-    src/app_loop.cpp
+    # Vulkan rendering
     src/vulkan_context.cpp
     src/swapchain.cpp
     src/renderer.cpp
     src/buffer_manager.cpp
     src/hud.cpp
-    src/microbench.cpp
     src/compute_decimator.cpp
     src/vma_impl.cpp
 )
 
 add_dependencies(grebe compile_shaders)
 
-target_link_libraries(grebe PRIVATE
-    grebe_common
+target_include_directories(grebe PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/ipc
+)
+
+target_link_libraries(grebe PUBLIC
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
     Vulkan::Vulkan
     glfw
     vk-bootstrap::vk-bootstrap
@@ -259,7 +241,7 @@ target_link_libraries(grebe PRIVATE
     imgui_lib
 )
 
-target_compile_definitions(grebe PRIVATE
+target_compile_definitions(grebe PUBLIC
     SHADER_DIR="${SHADER_BINARY_DIR}"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -272,16 +254,38 @@ else()
 endif()
 
 # =============================================================================
-# Signal generator executable (grebe-sg)
+# grebe-viewer — Reference viewer application
+# =============================================================================
+
+add_executable(grebe-viewer
+    apps/viewer/main.cpp
+    apps/viewer/app_loop.cpp
+    apps/viewer/cli.cpp
+    apps/viewer/microbench.cpp
+)
+
+target_include_directories(grebe-viewer PRIVATE
+    ${CMAKE_SOURCE_DIR}/apps/viewer
+)
+
+target_link_libraries(grebe-viewer PRIVATE grebe)
+
+if(MSVC)
+    target_compile_options(grebe-viewer PRIVATE /W4)
+else()
+    target_compile_options(grebe-viewer PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# =============================================================================
+# grebe-sg — Signal generator executable
 # =============================================================================
 
 add_executable(grebe-sg
-    src/sg_main.cpp
+    apps/sg/sg_main.cpp
 )
 
 target_link_libraries(grebe-sg PRIVATE
-    grebe_common
-    glfw
+    grebe
     imgui_opengl_lib
     OpenGL::GL
 )
@@ -293,28 +297,38 @@ else()
 endif()
 
 # =============================================================================
+# grebe-bench — Benchmark suite (stub)
+# =============================================================================
+
+add_executable(grebe-bench
+    apps/bench/main.cpp
+)
+
+target_link_libraries(grebe-bench PRIVATE grebe)
+
+# =============================================================================
 # Convenience targets (Linux)
 # =============================================================================
 
 add_custom_target(run
-    COMMAND $<TARGET_FILE:grebe>
-    DEPENDS grebe
+    COMMAND $<TARGET_FILE:grebe-viewer>
+    DEPENDS grebe-viewer
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
-    COMMENT "Running grebe"
+    COMMENT "Running grebe-viewer"
 )
 
 add_custom_target(profile
-    COMMAND $<TARGET_FILE:grebe> --profile --ring-size=64M
-    DEPENDS grebe
+    COMMAND $<TARGET_FILE:grebe-viewer> --profile --ring-size=64M
+    DEPENDS grebe-viewer
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
     COMMENT "Running profile"
 )
 
-add_custom_target(bench
-    COMMAND $<TARGET_FILE:grebe> --bench
-    DEPENDS grebe
+add_custom_target(bench-run
+    COMMAND $<TARGET_FILE:grebe-viewer> --bench
+    DEPENDS grebe-viewer
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     USES_TERMINAL
     COMMENT "Running microbenchmarks"
