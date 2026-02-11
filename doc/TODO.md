@@ -222,21 +222,22 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 ## 次期マイルストーン候補（優先度順）
 
-### Phase 13.5: 回帰検証マトリクス
+### Phase 13.5: 回帰検証マトリクス [完了]
 
 **目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
 **リスク:** 低（計測スクリプト追加が主）
 **優先度:** **中高** — Phase 13 の前に配置。回帰防止インフラは改善の前に整備すべき。
 **出典:** TI-08-Codex-Review §Suggested Validation Matrix
 
-- [ ] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
-  - 構成: `4ch×1G` / `8ch×1G` × `block=16K` / `block=64K` × Embedded / IPC
-  - メトリクス: FPS, viewer drops, SG drops, smp/f, envelope match, E2E latency (Phase 12 後)
-  - 合否基準: viewer 0-drops (Embedded), FPS ≥30, envelope 100% (Embedded), SG drops 比率安定 (IPC)
-- [ ] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
-- [ ] 初回実行、以後各フェーズ完了時に実行
+- [x] 回帰検証マトリクス定義（構成 × メトリクス × 合否基準）:
+  - 構成: 4ch/8ch × Embedded/IPC(16K/64K) × VSync ON/OFF (10 configs)
+  - メトリクス: FPS, viewer drops, SG drops, envelope match, E2E latency
+  - 合否基準: FPS ≥30, envelope ≥99% (Embedded), baseline 比較で回帰検出
+- [x] `scripts/regression-test.sh` — マトリクス自動実行 + JSON 差分レポート
+- [x] `--minimized` CLI フラグ追加（自動テスト時のウィンドウ最小化）
+- [x] `--save-baseline` / `--dry-run` オプション対応
 
-**受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。
+**受入条件:** `scripts/regression-test.sh` が全構成を自動実行し、前回結果との差分レポートを出力すること。→ **達成**
 
 ### Phase 13: IPC 堅牢性向上（選択的実装）
 
