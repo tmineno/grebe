@@ -2,10 +2,7 @@
 #include "app_loop.h"
 #include "cli.h"
 #include "drop_counter.h"
-#include "vulkan_context.h"
-#include "swapchain.h"
-#include "renderer.h"
-#include "buffer_manager.h"
+#include "vulkan_renderer.h"
 #include "synthetic_source.h"
 #include "ipc_source.h"
 #include "ingestion_thread.h"
@@ -68,44 +65,28 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("Failed to create GLFW window");
         }
 
-        // Init Vulkan
-        VulkanContext ctx;
-        ctx.init(window);
-
-        int fb_width, fb_height;
-        glfwGetFramebufferSize(window, &fb_width, &fb_height);
-
-        Swapchain swapchain;
-        swapchain.init(ctx, static_cast<uint32_t>(fb_width), static_cast<uint32_t>(fb_height));
-
-        BufferManager buf_mgr;
-        buf_mgr.init(ctx);
-
-        Renderer renderer;
-        renderer.init(ctx, swapchain, SHADER_DIR);
+        // Init Vulkan rendering backend
+        VulkanRenderer vk_renderer;
+        vk_renderer.initialize(window, SHADER_DIR);
 
         // Apply --no-vsync if requested
         if (opts.no_vsync) {
-            swapchain.set_vsync(false);
-            swapchain.recreate(ctx, static_cast<uint32_t>(fb_width),
-                               static_cast<uint32_t>(fb_height));
-            renderer.on_swapchain_recreated(ctx, swapchain);
+            vk_renderer.set_vsync(false);
             spdlog::info("V-Sync disabled via --no-vsync");
         }
 
         // Bench mode: run microbenchmarks and exit (no grebe-sg needed)
         if (opts.enable_bench) {
-            swapchain.set_vsync(false);
-            swapchain.recreate(ctx, static_cast<uint32_t>(fb_width),
-                               static_cast<uint32_t>(fb_height));
-            renderer.on_swapchain_recreated(ctx, swapchain);
+            vk_renderer.set_vsync(false);
 
-            int bench_code = run_microbenchmarks(ctx, swapchain, buf_mgr, renderer, SHADER_DIR);
+            int bench_code = run_microbenchmarks(
+                vk_renderer.vulkan_context(),
+                vk_renderer.swapchain_obj(),
+                vk_renderer.buffer_manager(),
+                vk_renderer.renderer_obj(),
+                SHADER_DIR);
 
-            renderer.destroy();
-            buf_mgr.destroy();
-            swapchain.destroy(ctx.device());
-            ctx.destroy();
+            vk_renderer.shutdown();
             glfwDestroyWindow(window);
             glfwTerminate();
             return bench_code;
@@ -122,7 +103,8 @@ int main(int argc, char* argv[]) {
         }
 
         Hud hud;
-        hud.init(window, ctx, renderer.render_pass(), swapchain.image_count());
+        hud.init(window, vk_renderer.vulkan_context(),
+                 vk_renderer.render_pass(), vk_renderer.image_count());
 
         // =====================================================================
         // Streaming pipeline: ring buffers (used by both modes)
@@ -156,14 +138,12 @@ int main(int argc, char* argv[]) {
         IngestionThread ingestion;
 
         if (opts.embedded) {
-            // Embedded mode: SyntheticSource + IngestionThread
             synthetic_source = std::make_unique<SyntheticSource>(
                 opts.num_channels, 1'000'000.0, WaveformType::Sine);
             synthetic_source->start();
             ingestion.start(*synthetic_source, ring_ptrs, drop_ptrs);
             spdlog::info("Embedded mode: SyntheticSource + IngestionThread");
         } else {
-            // IPC mode: spawn grebe-sg, IpcSource + IngestionThread
             std::string sg_path = find_sg_binary(argv[0]);
             std::vector<std::string> sg_args;
             sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
@@ -182,7 +162,6 @@ int main(int argc, char* argv[]) {
             pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
             ipc_source = std::make_unique<IpcSource>(*pipe_consumer, opts.num_channels);
             ipc_source->start();
-            // IngestionThread launched after dec_thread & app are ready
         }
 
         // =====================================================================
@@ -199,7 +178,7 @@ int main(int argc, char* argv[]) {
 
         ProfileRunner profiler;
         profiler.set_channel_count(opts.num_channels);
-        profiler.set_synthetic_source(synthetic_source.get());  // nullptr in IPC mode
+        profiler.set_synthetic_source(synthetic_source.get());
         if (opts.enable_profile) {
             spdlog::info("Profile mode enabled");
             if (!benchmark.is_logging()) {
@@ -224,13 +203,10 @@ int main(int argc, char* argv[]) {
         AppComponents app{};
         app.window = window;
         app.cmd_queue = &cmd_queue;
-        app.ctx = &ctx;
-        app.swapchain = &swapchain;
-        app.renderer = &renderer;
-        app.buf_mgr = &buf_mgr;
+        app.render_backend = &vk_renderer;
         app.hud = &hud;
-        app.synthetic_source = synthetic_source.get();  // nullptr in IPC mode
-        app.ipc_source = ipc_source.get();              // nullptr in embedded mode
+        app.synthetic_source = synthetic_source.get();
+        app.ipc_source = ipc_source.get();
         app.ingestion = &ingestion;
         app.dec_thread = &dec_thread;
         app.benchmark = &benchmark;
@@ -250,24 +226,16 @@ int main(int argc, char* argv[]) {
         benchmark.stop_logging();
 
         if (synthetic_source) {
-            // Embedded: stop source first (read_frame returns EndOfStream),
-            // then join ingestion thread
             synthetic_source->stop();
             ingestion.stop();
         } else if (ipc_source) {
-            // IPC: close pipe first to unblock blocking receive_frame(),
-            // then join ingestion thread
-            pipe_consumer.reset();  // closes pipe fds, read_frame returns EndOfStream
+            pipe_consumer.reset();
             ingestion.stop();
             ipc_source->stop();
         }
 
         dec_thread.stop();
-
-        // grebe-sg cleanup: ProcessHandle destructor terminates + waits
         sg_process.reset();
-
-        vkDeviceWaitIdle(ctx.device());
 
         int exit_code = 0;
         if (opts.enable_profile) {
@@ -275,10 +243,7 @@ int main(int argc, char* argv[]) {
         }
 
         hud.destroy();
-        renderer.destroy();
-        buf_mgr.destroy();
-        swapchain.destroy(ctx.device());
-        ctx.destroy();
+        vk_renderer.shutdown();
 
         glfwDestroyWindow(window);
         glfwTerminate();

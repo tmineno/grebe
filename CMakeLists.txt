@@ -220,6 +220,7 @@ add_library(grebe STATIC
     src/renderer.cpp
     src/buffer_manager.cpp
     src/hud.cpp
+    src/vulkan_renderer.cpp
     src/compute_decimator.cpp
     src/vma_impl.cpp
 )

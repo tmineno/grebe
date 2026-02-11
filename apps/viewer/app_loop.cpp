@@ -1,10 +1,7 @@
 #include "app_loop.h"
 #include "app_command.h"
 #include "drop_counter.h"
-#include "vulkan_context.h"
-#include "swapchain.h"
-#include "renderer.h"
-#include "buffer_manager.h"
+#include "vulkan_renderer.h"
 #include "synthetic_source.h"
 #include "ipc_source.h"
 #include "ingestion_thread.h"
@@ -51,7 +48,6 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
     case GLFW_KEY_2:
     case GLFW_KEY_3:
     case GLFW_KEY_4:
-        // IPC mode: rate is controlled by grebe-sg UI
         if (!state->is_ipc_mode) {
             const double rates[] = {1e6, 10e6, 100e6, 1e9};
             q.push(CmdSetSampleRate{rates[key - GLFW_KEY_1]});
@@ -94,16 +90,9 @@ static void process_commands(AppComponents& app) {
                     app.current_paused.store(!app.current_paused.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 }
             } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
-                int w, h;
-                glfwGetFramebufferSize(app.window, &w, &h);
-                if (w > 0 && h > 0) {
-                    app.swapchain->set_vsync(!app.swapchain->vsync());
-                    app.swapchain->recreate(*app.ctx,
-                                            static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-                    app.renderer->on_swapchain_recreated(*app.ctx, *app.swapchain);
-                    app.hud->on_swapchain_recreated(app.swapchain->image_count());
-                    spdlog::info("V-Sync {}", app.swapchain->vsync() ? "ON" : "OFF");
-                }
+                app.render_backend->set_vsync(!app.render_backend->vsync());
+                app.hud->on_swapchain_recreated(app.render_backend->image_count());
+                spdlog::info("V-Sync {}", app.render_backend->vsync() ? "ON" : "OFF");
             } else if constexpr (std::is_same_v<T, CmdQuit>) {
                 glfwSetWindowShouldClose(app.window, GLFW_TRUE);
             }
@@ -133,20 +122,20 @@ void run_main_loop(AppComponents& app) {
         {0.3f, 0.5f, 1.0f},  // Ch7: blue
     };
 
-    // Per-channel push constants
-    std::vector<WaveformPushConstants> channel_pcs(app.num_channels);
+    // Per-channel draw commands
+    std::vector<grebe::DrawCommand> channel_cmds(app.num_channels);
     float n = static_cast<float>(app.num_channels);
     for (uint32_t ch = 0; ch < app.num_channels; ch++) {
-        auto& pc = channel_pcs[ch];
-        pc.amplitude_scale = 0.8f / n;
-        pc.vertical_offset = 1.0f - (2.0f * ch + 1.0f) / n;
-        pc.horizontal_scale = 1.0f;
-        pc.horizontal_offset = 0.0f;
-        pc.vertex_count = 0;
-        pc.color_r = palette[ch].r;
-        pc.color_g = palette[ch].g;
-        pc.color_b = palette[ch].b;
-        pc.color_a = 1.0f;
+        auto& dc = channel_cmds[ch];
+        dc.amplitude_scale = 0.8f / n;
+        dc.vertical_offset = 1.0f - (2.0f * ch + 1.0f) / n;
+        dc.horizontal_scale = 1.0f;
+        dc.horizontal_offset = 0.0f;
+        dc.vertex_count = 0;
+        dc.color_r = palette[ch].r;
+        dc.color_g = palette[ch].g;
+        dc.color_b = palette[ch].b;
+        dc.color_a = 1.0f;
     }
 
     // Per-frame data buffer (receives decimated output)
@@ -171,10 +160,9 @@ void run_main_loop(AppComponents& app) {
             int w, h;
             glfwGetFramebufferSize(app.window, &w, &h);
             if (w > 0 && h > 0) {
-                app.swapchain->recreate(*app.ctx,
-                                        static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-                app.renderer->on_swapchain_recreated(*app.ctx, *app.swapchain);
-                app.hud->on_swapchain_recreated(app.swapchain->image_count());
+                app.render_backend->on_resize(static_cast<uint32_t>(w),
+                                              static_cast<uint32_t>(h));
+                app.hud->on_swapchain_recreated(app.render_backend->image_count());
             }
             continue;
         }
@@ -215,8 +203,7 @@ void run_main_loop(AppComponents& app) {
             ? app.synthetic_source->is_paused()
             : app.current_paused.load(std::memory_order_relaxed);
 
-        // Sync decimation thread with actual sample rate (needed for IPC mode
-        // where rate changes come from grebe-sg headers via IngestionThread)
+        // Sync decimation thread with actual sample rate
         if (data_rate > 0.0) {
             app.dec_thread->set_sample_rate(data_rate);
         }
@@ -227,23 +214,23 @@ void run_main_loop(AppComponents& app) {
         // Upload decimated data to GPU (timed)
         t0 = Benchmark::now();
         if (has_new_data && !frame_data.empty()) {
-            app.buf_mgr->upload_streaming(frame_data);
+            app.render_backend->upload_vertices(frame_data.data(), frame_data.size());
         }
         app.benchmark->set_upload_time(Benchmark::elapsed_ms(t0));
 
         // Promote completed transfers to draw position (timed)
         t0 = Benchmark::now();
-        app.buf_mgr->try_swap();
+        app.render_backend->swap_buffers();
         app.benchmark->set_swap_time(Benchmark::elapsed_ms(t0));
 
-        app.benchmark->set_vertex_count(app.buf_mgr->vertex_count());
+        app.benchmark->set_vertex_count(app.render_backend->vertex_count());
 
         // Update per-channel vertex counts and first_vertex offsets
         uint32_t per_ch_vtx = app.dec_thread->per_channel_vertex_count();
         uint32_t first_vtx = 0;
         for (uint32_t ch = 0; ch < app.num_channels; ch++) {
-            channel_pcs[ch].vertex_count = static_cast<int>(per_ch_vtx);
-            channel_pcs[ch].first_vertex = static_cast<int>(first_vtx);
+            channel_cmds[ch].vertex_count = static_cast<int>(per_ch_vtx);
+            channel_cmds[ch].first_vertex = static_cast<int>(first_vtx);
             first_vtx += per_ch_vtx;
         }
 
@@ -261,9 +248,7 @@ void run_main_loop(AppComponents& app) {
         // Sequence gaps
         uint64_t seq_gaps = app.ingestion ? app.ingestion->sequence_gaps() : 0;
 
-        // Dynamic time-span limits derived from runtime system settings.
-        // Lower: at least one sample period and >= 64 samples for stable visualization.
-        // Upper: bounded by per-channel ring capacity.
+        // Dynamic time-span limits
         double min_time_span_s = 1e-6;
         double max_time_span_s = 100e-3;
         if (data_rate > 0.0) {
@@ -289,7 +274,7 @@ void run_main_loop(AppComponents& app) {
 
         app.hud->build_status_bar(*app.benchmark, data_rate,
                                   app.dec_thread->ring_fill_ratio(),
-                                  app.buf_mgr->vertex_count(),
+                                  app.render_backend->vertex_count(),
                                   paused,
                                   app.dec_thread->effective_mode(),
                                   app.num_channels,
@@ -324,18 +309,18 @@ void run_main_loop(AppComponents& app) {
         // Render (timed)
         t0 = Benchmark::now();
         auto hud_region = app.hud->waveform_region();
-        DrawRegionPx draw_region{
+        grebe::DrawRegion draw_region{
             hud_region.x,
             hud_region.y,
             hud_region.width,
             hud_region.height
         };
-        bool ok = app.renderer->draw_frame(*app.ctx, *app.swapchain, *app.buf_mgr,
-                                           channel_pcs.data(), app.num_channels,
-                                           &draw_region, app.hud);
+        bool ok = app.render_backend->draw_frame_with_hud(
+            channel_cmds.data(), app.num_channels,
+            &draw_region, app.hud);
         app.benchmark->set_render_time(Benchmark::elapsed_ms(t0));
 
-        // E2E latency: producer_ts → render completion
+        // E2E latency: producer_ts -> render completion
         double e2e_ms = 0.0;
         if (producer_ts > 0) {
             auto now_ns = static_cast<uint64_t>(
@@ -349,10 +334,9 @@ void run_main_loop(AppComponents& app) {
             int w, h;
             glfwGetFramebufferSize(app.window, &w, &h);
             if (w > 0 && h > 0) {
-                app.swapchain->recreate(*app.ctx,
-                                        static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-                app.renderer->on_swapchain_recreated(*app.ctx, *app.swapchain);
-                app.hud->on_swapchain_recreated(app.swapchain->image_count());
+                app.render_backend->on_resize(static_cast<uint32_t>(w),
+                                              static_cast<uint32_t>(h));
+                app.hud->on_swapchain_recreated(app.render_backend->image_count());
             }
             continue;
         }
@@ -361,7 +345,7 @@ void run_main_loop(AppComponents& app) {
 
         // Profile mode: collect metrics and manage scenario transitions
         if (app.enable_profile) {
-            app.profiler->on_frame(*app.benchmark, app.buf_mgr->vertex_count(),
+            app.profiler->on_frame(*app.benchmark, app.render_backend->vertex_count(),
                                    data_rate,
                                    app.dec_thread->ring_fill_ratio(),
                                    total_drops, sg_drops,

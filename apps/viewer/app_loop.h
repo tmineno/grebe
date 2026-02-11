@@ -7,10 +7,7 @@
 
 struct GLFWwindow;
 class AppCommandQueue;
-class VulkanContext;
-class Swapchain;
-class Renderer;
-class BufferManager;
+class VulkanRenderer;
 class Hud;
 class SyntheticSource;
 class IpcSource;
@@ -23,10 +20,7 @@ class DropCounter;
 struct AppComponents {
     GLFWwindow* window;
     AppCommandQueue* cmd_queue;
-    VulkanContext* ctx;
-    Swapchain* swapchain;
-    Renderer* renderer;
-    BufferManager* buf_mgr;
+    VulkanRenderer* render_backend;
     Hud* hud;
     SyntheticSource* synthetic_source = nullptr;  // non-null in embedded mode
     IpcSource* ipc_source = nullptr;              // non-null in IPC mode
