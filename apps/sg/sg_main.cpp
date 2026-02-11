@@ -42,10 +42,36 @@ struct SgOptions {
     uint16_t    udp_port   = 5000;
 };
 
+static void print_sg_help() {
+    std::fprintf(stderr,
+        "grebe-sg — Signal generator for grebe-viewer\n"
+        "\n"
+        "Usage: grebe-sg [OPTIONS]\n"
+        "\n"
+        "Transport:\n"
+        "  --transport=MODE   Transport mode: pipe (default) or udp\n"
+        "  --udp-target=H:P   UDP target host:port (default: 127.0.0.1:5000)\n"
+        "\n"
+        "Source:\n"
+        "  --sample-rate=RATE Initial sample rate in Hz (default: 1000000)\n"
+        "  --frequency=HZ    Waveform frequency in Hz (default: 1000)\n"
+        "  --file=PATH        Binary file playback (.grb format)\n"
+        "\n"
+        "Options:\n"
+        "  --channels=N       Number of channels, 1-8 (default: 1)\n"
+        "  --ring-size=SIZE   Ring buffer size with K/M/G suffix (default: 64M)\n"
+        "  --block-size=N     Samples per channel per frame (default: 16384)\n"
+        "  --help             Show this help and exit\n"
+    );
+}
+
 static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg.rfind("--channels=", 0) == 0) {
+        if (arg == "--help" || arg == "-h") {
+            print_sg_help();
+            return 2;
+        } else if (arg.rfind("--channels=", 0) == 0) {
             int n = std::stoi(arg.substr(11));
             if (n < 1 || n > 8) {
                 spdlog::error("--channels must be 1-8");
@@ -215,7 +241,7 @@ int main(int argc, char* argv[]) {
     spdlog::set_pattern("[grebe-sg] [%H:%M:%S.%e] [%l] %v");
 
     SgOptions opts;
-    if (int rc = parse_sg_cli(argc, argv, opts); rc != 0) return rc;
+    if (int rc = parse_sg_cli(argc, argv, opts); rc != 0) return rc == 2 ? 0 : rc;
 
     // If --file specified, validate and get channel count from file
     std::unique_ptr<FileReader> file_reader;

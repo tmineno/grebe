@@ -18,9 +18,9 @@ All other dependencies are fetched automatically via CMake FetchContent.
 include/grebe/          Public API headers (IDataSource, IRenderBackend, DecimationEngine, etc.)
 src/                    libgrebe core (decimation, ring buffer, ingestion, synthetic source)
 apps/
-  viewer/               grebe-viewer (Vulkan renderer, HUD, profiler, benchmarks, IPC source)
-  sg/                   grebe-sg (signal generator process, OpenGL GUI, IPC pipe output)
-  common/ipc/           Shared IPC protocol (contracts, transport, pipe implementation)
+  viewer/               grebe-viewer (Vulkan renderer, HUD, profiler, benchmarks, transport source)
+  sg/                   grebe-sg (signal generator process, OpenGL GUI, Pipe/UDP transport)
+  common/ipc/           Shared transport protocol (contracts, pipe, UDP implementations)
   bench/                grebe-bench (standalone benchmark suite — stub)
 doc/                    RDD, TR-001, TODO, technical investigation reports
 ```
@@ -30,7 +30,7 @@ doc/                    RDD, TR-001, TODO, technical investigation reports
 ```
 ┌─ Application (grebe-viewer) ──────────────────────────────────────────┐
 │  VulkanRenderer (Vulkan + ImGui HUD)                                  │
-│  IpcSource / Benchmark / Profiler / ProcessHandle                     │
+│  TransportSource / Benchmark / Profiler / ProcessHandle               │
 ├───────────────────────────────────────────────────────────────────────┤
 │  libgrebe (data pipeline only, spdlog dependency)                     │
 │                                                                       │
@@ -39,9 +39,10 @@ doc/                    RDD, TR-001, TODO, technical investigation reports
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Two operational modes:
+Three operational modes:
 
-- **IPC mode** (default): grebe-viewer spawns grebe-sg, which generates data and sends it over a pipe
+- **Pipe mode** (default): grebe-viewer spawns grebe-sg, which generates data and sends it over stdout/stdin pipe
+- **UDP mode** (`--udp=PORT`): grebe-viewer receives from an independently running grebe-sg via UDP socket
 - **Embedded mode** (`--embedded`): single-process, SyntheticSource generates data in-process
 
 ## Build
@@ -66,8 +67,12 @@ cmake --build build
 ## Run
 
 ```bash
-# IPC mode (default): grebe-viewer spawns grebe-sg automatically
+# Pipe mode (default): grebe-viewer spawns grebe-sg automatically
 ./build/grebe-viewer
+
+# UDP mode: start grebe-sg and grebe-viewer independently
+./build/grebe-sg --transport=udp --udp-target=127.0.0.1:5000   # Terminal 1
+./build/grebe-viewer --udp=5000                                  # Terminal 2
 
 # Embedded mode: single-process, SyntheticSource in-process
 ./build/grebe-viewer --embedded
@@ -99,7 +104,9 @@ In IPC mode, sample rate and pause are controlled via the grebe-sg GUI window.
 
 | Option | Default | Description |
 |---|---|---|
+| `--help` | | Show help and exit |
 | `--embedded` | off | Single-process mode (no grebe-sg) |
+| `--udp=PORT` | | UDP receiver mode (listen on PORT, no subprocess) |
 | `--file=PATH` | | Binary file playback (`.grb` format, via grebe-sg) |
 | `--channels=N` | 1 | Number of channels (1-8) |
 | `--ring-size=SIZE` | 64M | Ring buffer size (K/M/G suffix supported) |
@@ -112,13 +119,18 @@ In IPC mode, sample rate and pause are controlled via the grebe-sg GUI window.
 
 ### grebe-sg (signal generator)
 
-grebe-sg is spawned automatically by grebe-viewer in IPC mode. It provides an OpenGL/ImGui control panel for sample rate, waveform type, and block size. It also accepts CLI arguments:
+grebe-sg is spawned automatically by grebe-viewer in pipe mode. It provides an OpenGL/ImGui control panel for sample rate, waveform type, and block size. It also accepts CLI arguments:
 
 | Option | Default | Description |
 |---|---|---|
+| `--help` | | Show help and exit |
 | `--channels=N` | 1 | Number of channels (1-8) |
 | `--ring-size=SIZE` | 64M | Ring buffer size |
-| `--block-size=SIZE` | 16384 | Samples per channel per IPC frame |
+| `--block-size=SIZE` | 16384 | Samples per channel per frame |
+| `--transport=MODE` | pipe | Transport mode: `pipe` (stdout/stdin) or `udp` (socket) |
+| `--udp-target=H:P` | 127.0.0.1:5000 | UDP target host:port (only with `--transport=udp`) |
+| `--sample-rate=RATE` | 1000000 | Initial sample rate (Hz) |
+| `--frequency=HZ` | 1000 | Waveform frequency (Hz) |
 | `--file=PATH` | | Binary file playback (`.grb` format) |
 
 ### Examples
@@ -129,6 +141,10 @@ grebe-sg is spawned automatically by grebe-viewer in IPC mode. It provides an Op
 
 # Embedded mode with CSV telemetry
 ./build/grebe-viewer --embedded --log
+
+# UDP mode: independent grebe-sg → grebe-viewer over network/loopback
+./build/grebe-sg --transport=udp --udp-target=127.0.0.1:5000 --channels=2
+./build/grebe-viewer --udp=5000 --channels=2 --no-vsync
 
 # Automated profiling with large ring buffer
 ./build/grebe-viewer --embedded --profile --ring-size=64M

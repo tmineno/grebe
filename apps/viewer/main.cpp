@@ -41,7 +41,7 @@ static std::string find_sg_binary(const char* argv0) {
 int main(int argc, char* argv[]) {
     try {
         CliOptions opts;
-        if (int rc = parse_cli(argc, argv, opts); rc != 0) return rc;
+        if (int rc = parse_cli(argc, argv, opts); rc != 0) return rc == 2 ? 0 : rc;
 
 #ifndef NDEBUG
         if (opts.enable_profile || opts.enable_bench) {

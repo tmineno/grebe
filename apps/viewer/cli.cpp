@@ -2,12 +2,41 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdio>
 #include <string>
+
+static void print_help() {
+    std::puts(
+        "grebe-viewer — High-speed real-time waveform viewer\n"
+        "\n"
+        "Usage: grebe-viewer [OPTIONS]\n"
+        "\n"
+        "Modes:\n"
+        "  (default)        Pipe mode: auto-spawn grebe-sg subprocess\n"
+        "  --embedded       Single-process mode (SyntheticSource, no grebe-sg)\n"
+        "  --udp=PORT       UDP mode: listen on PORT for external grebe-sg\n"
+        "\n"
+        "Options:\n"
+        "  --channels=N     Number of channels, 1-8 (default: 1)\n"
+        "  --ring-size=SIZE Ring buffer size with K/M/G suffix (default: 64M)\n"
+        "  --block-size=N   Samples per channel per frame, power of 2 (default: 16384)\n"
+        "  --file=PATH      Binary file playback (.grb format, via grebe-sg)\n"
+        "  --no-vsync       Disable V-Sync at startup\n"
+        "  --minimized      Start window iconified\n"
+        "  --log            CSV telemetry logging to ./tmp/\n"
+        "  --profile        Automated profiling, JSON report to ./tmp/\n"
+        "  --bench          Isolated microbenchmarks, JSON to ./tmp/\n"
+        "  --help           Show this help and exit\n"
+    );
+}
 
 int parse_cli(int argc, char* argv[], CliOptions& opts) {
     for (int i = 1; i < argc; i++) {
         std::string arg(argv[i]);
-        if (arg == "--log") {
+        if (arg == "--help" || arg == "-h") {
+            print_help();
+            return 2;  // signal caller to exit with code 0
+        } else if (arg == "--log") {
             opts.enable_log = true;
         } else if (arg == "--profile") {
             opts.enable_profile = true;
