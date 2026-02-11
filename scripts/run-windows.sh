@@ -3,7 +3,20 @@
 set -euo pipefail
 
 WIN_BUILD_ROOT="${WIN_BUILD_ROOT:-/mnt/c/tmp/grebe}"
-EXE_PATH="${WIN_BUILD_ROOT}/build/grebe-viewer.exe"
+
+# Support different executables: run-windows.sh [bench|sg|viewer] [args...]
+# Default: grebe-viewer
+EXE_NAME="grebe-viewer"
+ARGS=("$@")
+if [ $# -gt 0 ]; then
+    case "$1" in
+        bench)  EXE_NAME="grebe-bench"; ARGS=("${@:2}") ;;
+        sg)     EXE_NAME="grebe-sg";    ARGS=("${@:2}") ;;
+        viewer) EXE_NAME="grebe-viewer"; ARGS=("${@:2}") ;;
+    esac
+fi
+
+EXE_PATH="${WIN_BUILD_ROOT}/build/${EXE_NAME}.exe"
 
 if [ ! -f "${EXE_PATH}" ]; then
     echo "ERROR: Executable not found at ${EXE_PATH}" >&2
@@ -16,7 +29,7 @@ WIN_CWD=$(wslpath -w "${WIN_BUILD_ROOT}/build")
 
 echo "[run] Executable: ${WIN_EXE}"
 echo "[run] Working dir: ${WIN_CWD}"
-echo "[run] Arguments: $*"
+echo "[run] Arguments: ${ARGS[*]:-}"
 echo ""
 
 # Generate a small .bat to avoid cmd.exe quoting issues
@@ -24,7 +37,7 @@ RUN_BAT="${WIN_BUILD_ROOT}/run_grebe.bat"
 cat > "${RUN_BAT}" << BATEOF
 @echo off
 cd /d ${WIN_CWD}
-${WIN_EXE} $*
+${WIN_EXE} ${ARGS[*]:-}
 BATEOF
 
 WIN_BAT=$(wslpath -w "${RUN_BAT}")

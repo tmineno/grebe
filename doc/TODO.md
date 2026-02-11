@@ -264,6 +264,49 @@ UDP トランスポートのスループット上限を定量測定し、ボト�
 
 ---
 
+## Phase 9.2: UDP データパス最適化 (scatter-gather + sendmmsg) ✅
+
+Phase 9.1 で特定したボトルネック（per-frame syscall + 中間 `memcpy`）を、
+scatter-gather I/O と Linux sendmmsg/recvmmsg バッチ化で改善。
+
+- [x] `UdpProducer`: scatter-gather 送信 (`sendmsg` + `iovec` / `WSASendTo` + `WSABUF`)
+- [x] `UdpConsumer`: scatter-gather 受信 (`recvfrom` 維持、recvmmsg バッチ対応)
+- [x] `UdpProducer`: バッチ蓄積 + `sendmmsg()` 一括送信 (Linux) / scatter-gather ループ (Windows)
+- [x] `UdpProducer`: `flush()` メソッド追加、sender_thread から呼び出し
+- [x] `UdpConsumer`: `recvmmsg()` 一括受信 + 内部キュー (Linux) / 単発 recvfrom (Windows)
+- [x] `grebe-bench`: `--udp-burst=N` オプション追加
+- [x] BM-H: scatter-gather / sendmmsg 有無の比較測定 (WSL2)
+- [x] `doc/TI-phase9.2.md` に結果記録
+
+**測定結果 (WSL2, 1400B datagram):**
+- scatter-gather (burst=1): ~98 MSPS — Phase 9.1 baseline と同等 (memcpy 削減は WSL2 では有意差なし)
+- sendmmsg (burst=64): **108 MSPS** (+11% throughput)
+- 100 MSPS target: burst=1 **36% drops** → burst=8 **0% drops** (最大の改善)
+- 詳細: `doc/TI-phase9.2.md`
+
+**Windows native 測定結果 (scatter-gather WSASendTo):**
+- 65KB datagram: **3,321 MSPS** (Phase 9.1: 3,371 MSPS, −1.5% ノイズ範囲) → **回帰なし** ✅
+- 1400B datagram: 134 MSPS, 全シナリオ **0% drops** ✅
+
+**受入条件:**
+- ⚠️ WSL2 は 65KB datagram 不可 → Linux native ≥1.5x は別途測定要
+- ✅ Windows native: scatter-gather で回帰なし (3,321 vs 3,371 MSPS)
+- ✅ burst=8 で 100 MSPS 0% drops 達成
+- ✅ burst=1 で Phase 9.1 同等 (フォールバック互換)
+
+### 将来実装（本 Phase のスコープ外）
+
+| 施策 | リスク | 見送り理由 |
+|---|---|---|
+| IOCP backend (`WSASendTo` Overlapped) | **高** | 非同期パラダイムへの全面変更、エラーハンドリング複雑。Windows は既に 3,400 MSPS で十分 |
+| RIO (Registered I/O) backend | **高** | Win8+ 限定、pre-registered buffer 管理が複雑。PoC では過剰 |
+| TX/RX 専用ワーカースレッド | **高** | スレッド同期・shutdown・エラー伝搬の複雑性。現在の同期モデルで十分な帯域 |
+| `DatagramIoBackend` 抽象レイヤー | **中** | backend が 2 種 (sync + mmsg) では抽象化コストが見合わない。3 種以上になった時点で導入 |
+| 固定長バッファプール + lock-free 化 | **中** | 現在の `vector<uint8_t>` で帯域上限に到達。PoC ではメモリ管理の複雑性を避ける |
+| 共有メモリ / ゼロコピートランスポート | **高** | UDP とは別アーキテクチャ。4ch × 1 GSPS (8 GB/s) が必要になった時点で別 Phase として設計 |
+
+---
+
 ## Phase 10: grebe-bench ベンチマークスイート (NFR-01, NFR-02)
 
 NFR 検証用の独立ベンチマークツール。
@@ -310,5 +353,6 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 8. FileSource | FR-01 | ✅ 完了 |
 | 9. UDP トランスポート | FR-01 | ✅ 完了 |
 | 9.1 UDP ボトルネック調査 | BM-H ベンチマーク | ✅ 完了 |
+| 9.2 UDP データパス最適化 | scatter-gather + sendmmsg | ✅ 完了 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
 | 11. クロスプラットフォーム | NFR-06 | 未着手 |

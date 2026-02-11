@@ -191,6 +191,11 @@ static void sender_thread_func(
             stop_requested.store(true, std::memory_order_relaxed);
             break;
         }
+
+        // Flush batched frames (no-op for pipe transport or burst_size=1)
+        if (auto* udp = dynamic_cast<UdpProducer*>(&producer)) {
+            udp->flush();
+        }
     }
 }
 

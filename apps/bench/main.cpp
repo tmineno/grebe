@@ -23,6 +23,7 @@ struct BenchOptions {
     int  duration     = 5;
     uint32_t channels = 1;        // channel count for rate scenarios
     size_t datagram_size = 1400;  // max UDP datagram bytes
+    uint32_t burst_size = 1;     // sendmmsg/recvmmsg batch size (1 = no batching)
     std::string json_path;  // empty = auto-generate
 };
 
@@ -36,6 +37,7 @@ void print_help(const char* argv0) {
         "  --channels=N       Channel count for rate scenarios (default: 1, max: 8)\n"
         "  --duration=N       Duration in seconds for transport benchmarks (default: 5)\n"
         "  --datagram-size=N  Max UDP datagram bytes (default: 1400, max: 65000)\n"
+        "  --udp-burst=N      sendmmsg/recvmmsg batch size (default: 1 = no batching, Linux only)\n"
         "  --json=PATH        Output JSON path (default: ./tmp/bench_<ts>.json)\n"
         "  --help             Show this help\n",
         argv0);
@@ -59,6 +61,10 @@ BenchOptions parse_args(int argc, char* argv[]) {
             opts.datagram_size = static_cast<size_t>(std::stoi(arg.substr(16)));
             if (opts.datagram_size > 65000) opts.datagram_size = 65000;
             if (opts.datagram_size < 128) opts.datagram_size = 128;
+        } else if (arg.rfind("--udp-burst=", 0) == 0) {
+            opts.burst_size = static_cast<uint32_t>(std::stoi(arg.substr(12)));
+            if (opts.burst_size < 1) opts.burst_size = 1;
+            if (opts.burst_size > 256) opts.burst_size = 256;
         } else if (arg.rfind("--json=", 0) == 0) {
             opts.json_path = arg.substr(7);
         } else if (arg == "--help" || arg == "-h") {
@@ -108,8 +114,8 @@ std::string make_timestamp_iso() {
 int main(int argc, char* argv[]) {
     auto opts = parse_args(argc, argv);
 
-    spdlog::info("grebe-bench: starting (duration={}s, channels={}, datagram_size={})",
-                 opts.duration, opts.channels, opts.datagram_size);
+    spdlog::info("grebe-bench: starting (duration={}s, channels={}, datagram_size={}, burst={})",
+                 opts.duration, opts.channels, opts.datagram_size, opts.burst_size);
 
     nlohmann::json report;
     report["timestamp"] = make_timestamp_iso();
@@ -121,7 +127,8 @@ int main(int argc, char* argv[]) {
 
     // --- BM-H: UDP loopback ---
     if (opts.run_udp || opts.run_all) {
-        report["bm_h_udp_loopback"] = run_bench_udp(opts.duration, opts.channels, opts.datagram_size);
+        report["bm_h_udp_loopback"] = run_bench_udp(opts.duration, opts.channels,
+                                                     opts.datagram_size, opts.burst_size);
     }
 
     // --- Write JSON report ---

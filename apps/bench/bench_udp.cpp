@@ -21,6 +21,7 @@ struct UdpBenchResult {
     uint32_t channels       = 0;
     uint32_t block_size     = 0;
     size_t   datagram_size  = 0;
+    uint32_t burst_size     = 0;
     double target_rate_msps = 0.0;  // 0 = unlimited
     double duration_s       = 0.0;
     uint64_t frames_sent    = 0;
@@ -42,12 +43,14 @@ UdpBenchResult bench_udp_scenario(const std::string& label,
                                    double target_rate_msps,
                                    int duration_s,
                                    uint16_t port,
-                                   size_t max_datagram) {
+                                   size_t max_datagram,
+                                   uint32_t burst_size) {
     UdpBenchResult result;
     result.label = label;
     result.channels = channels;
     result.block_size = block_size;
     result.datagram_size = max_datagram;
+    result.burst_size = burst_size;
     result.target_rate_msps = target_rate_msps;
 
     // Compute pacing interval (ns per frame) for rate-limited scenarios
@@ -62,6 +65,12 @@ UdpBenchResult bench_udp_scenario(const std::string& label,
     UdpConsumer consumer(port);
     UdpProducer producer("127.0.0.1", port);
     producer.set_max_datagram_size(max_datagram);
+
+    // Set burst size for sendmmsg/recvmmsg batching
+    if (burst_size > 1) {
+        producer.set_burst_size(burst_size);
+        consumer.set_burst_size(burst_size);
+    }
 
     // Prepare payload
     size_t payload_bytes = channels * block_size * sizeof(int16_t);
@@ -119,6 +128,9 @@ UdpBenchResult bench_udp_scenario(const std::string& label,
         }
     }
 
+    // Flush any remaining batched frames
+    producer.flush();
+
     auto t1 = Clock::now();
 
     // Brief sleep to let in-flight datagrams arrive, then close to unblock receiver
@@ -146,6 +158,7 @@ nlohmann::json result_to_json(const UdpBenchResult& r) {
     j["channels"]        = r.channels;
     j["block_size"]      = r.block_size;
     j["datagram_size"]   = r.datagram_size;
+    j["burst_size"]      = r.burst_size;
     j["target_rate_msps"]= r.target_rate_msps;
     j["duration_s"]      = r.duration_s;
     j["frames_sent"]     = r.frames_sent;
@@ -159,9 +172,10 @@ nlohmann::json result_to_json(const UdpBenchResult& r) {
 
 } // namespace
 
-nlohmann::json run_bench_udp(int duration_seconds, uint32_t channels, size_t max_datagram_size) {
-    spdlog::info("=== BM-H: UDP Loopback Throughput (channels={}, datagram_size={}) ===",
-                 channels, max_datagram_size);
+nlohmann::json run_bench_udp(int duration_seconds, uint32_t channels,
+                             size_t max_datagram_size, uint32_t burst_size) {
+    spdlog::info("=== BM-H: UDP Loopback Throughput (channels={}, datagram_size={}, burst={}) ===",
+                 channels, max_datagram_size, burst_size);
 
     nlohmann::json results = nlohmann::json::array();
 
@@ -191,7 +205,7 @@ nlohmann::json run_bench_udp(int duration_seconds, uint32_t channels, size_t max
         };
     }
 
-    spdlog::info("--- Block size variation (unlimited rate) ---");
+    spdlog::info("--- Block size variation (unlimited rate, burst={}) ---", burst_size);
     for (auto& s : block_scenarios) {
         uint32_t bs = s.block_size > 0 ? s.block_size : max_block_size(s.channels, max_datagram_size);
         // Skip scenarios where the fixed block_size exceeds datagram capacity
@@ -201,7 +215,8 @@ nlohmann::json run_bench_udp(int duration_seconds, uint32_t channels, size_t max
             continue;
         }
         spdlog::info("  Running: {} ({}ch x {} samples, unlimited)...", s.label, s.channels, bs);
-        auto r = bench_udp_scenario(s.label, s.channels, bs, 0.0, duration_seconds, BENCH_PORT, max_datagram_size);
+        auto r = bench_udp_scenario(s.label, s.channels, bs, 0.0, duration_seconds,
+                                    BENCH_PORT, max_datagram_size, burst_size);
         spdlog::info("    => {:.1f} MSPS, {:.0f} frames/s, drop {:.2f}%",
                       r.throughput_msps, r.frames_per_sec, r.drop_rate * 100);
         results.push_back(result_to_json(r));
@@ -222,11 +237,13 @@ nlohmann::json run_bench_udp(int duration_seconds, uint32_t channels, size_t max
 
     std::string ch_prefix = std::to_string(channels) + "ch_";
     uint32_t bs = max_block_size(channels, max_datagram_size);
-    spdlog::info("--- Target rate scenarios ({}ch x {} samples/ch) ---", channels, bs);
+    spdlog::info("--- Target rate scenarios ({}ch x {} samples/ch, burst={}) ---",
+                 channels, bs, burst_size);
     for (auto& s : rate_scenarios) {
         std::string label = ch_prefix + s.label_suffix;
         spdlog::info("  Running: {} ({:.0f} MSPS/ch target)...", label, s.rate_msps);
-        auto r = bench_udp_scenario(label, channels, bs, s.rate_msps, duration_seconds, BENCH_PORT, max_datagram_size);
+        auto r = bench_udp_scenario(label, channels, bs, s.rate_msps, duration_seconds,
+                                    BENCH_PORT, max_datagram_size, burst_size);
         spdlog::info("    => {:.1f} MSPS/ch actual, {:.0f} frames/s, drop {:.2f}%",
                       r.throughput_msps, r.frames_per_sec, r.drop_rate * 100);
         results.push_back(result_to_json(r));
