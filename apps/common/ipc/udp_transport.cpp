@@ -85,8 +85,8 @@ bool UdpProducer::send_frame(const FrameHeaderV2& header, const void* payload) {
 #endif
 
     size_t total = sizeof(header) + header.payload_bytes;
-    if (total > 65000) {
-        spdlog::warn("UdpProducer: datagram too large ({} bytes), dropping", total);
+    if (total > 1400) {
+        spdlog::warn("UdpProducer: datagram too large ({} bytes, max 1400), dropping", total);
         return false;
     }
 
@@ -117,6 +117,12 @@ bool UdpProducer::send_frame(const FrameHeaderV2& header, const void* payload) {
     }
 #endif
 
+    ++send_count_;
+    if (send_count_ == 1) {
+        spdlog::info("UdpProducer: first frame sent (seq={}, {} bytes)",
+                     header.sequence, total);
+    }
+
     return true;
 }
 
@@ -143,10 +149,28 @@ UdpConsumer::UdpConsumer(uint16_t port) {
     }
 #endif
 
+    // Allow quick rebind after restart
+    int reuse = 1;
+    setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
     // Set receive buffer to 4 MB
     int rcvbuf = 4 * 1024 * 1024;
     setsockopt(sock_, SOL_SOCKET, SO_RCVBUF,
                reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+
+    // Set receive timeout (500ms) so ingestion thread can check stop_requested
+#ifdef _WIN32
+    DWORD timeout_ms = 500;
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+#else
+    struct timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 500'000;  // 500ms
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
 
     struct sockaddr_in bind_addr{};
     bind_addr.sin_family = AF_INET;
@@ -174,54 +198,92 @@ UdpConsumer::UdpConsumer(uint16_t port) {
 }
 
 UdpConsumer::~UdpConsumer() {
-    close_socket(sock_);
+    close();
+}
+
+void UdpConsumer::close() {
+    closed_.store(true, std::memory_order_release);
+#ifdef _WIN32
+    if (sock_ != INVALID_SOCKET) {
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+    }
+#else
+    if (sock_ >= 0) {
+        ::close(sock_);
+        sock_ = -1;
+    }
+#endif
 }
 
 bool UdpConsumer::receive_frame(FrameHeaderV2& header, std::vector<int16_t>& payload) {
+    while (!closed_.load(std::memory_order_acquire)) {
 #ifdef _WIN32
-    if (sock_ == INVALID_SOCKET) return false;
+        if (sock_ == INVALID_SOCKET) return false;
 
-    int received = recvfrom(sock_,
-                            reinterpret_cast<char*>(recv_buf_.data()),
-                            static_cast<int>(recv_buf_.size()), 0,
-                            nullptr, nullptr);
-    if (received == SOCKET_ERROR || received < static_cast<int>(sizeof(FrameHeaderV2))) {
-        return false;
-    }
-    size_t nbytes = static_cast<size_t>(received);
-#else
-    if (sock_ < 0) return false;
-
-    ssize_t received = recvfrom(sock_, recv_buf_.data(), recv_buf_.size(), 0,
+        int received = recvfrom(sock_,
+                                reinterpret_cast<char*>(recv_buf_.data()),
+                                static_cast<int>(recv_buf_.size()), 0,
                                 nullptr, nullptr);
-    if (received < static_cast<ssize_t>(sizeof(FrameHeaderV2))) {
-        return false;
-    }
-    size_t nbytes = static_cast<size_t>(received);
+        if (received == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) continue;  // timeout, retry
+            if (closed_.load(std::memory_order_relaxed)) return false;
+            spdlog::warn("UdpConsumer: recvfrom error: {}", err);
+            return false;
+        }
+        if (received < static_cast<int>(sizeof(FrameHeaderV2))) {
+            continue;  // too small, skip
+        }
+        size_t nbytes = static_cast<size_t>(received);
+#else
+        if (sock_ < 0) return false;
+
+        ssize_t received = recvfrom(sock_, recv_buf_.data(), recv_buf_.size(), 0,
+                                    nullptr, nullptr);
+        if (received < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;  // timeout, retry
+            if (closed_.load(std::memory_order_relaxed)) return false;
+            spdlog::warn("UdpConsumer: recvfrom error: {}", std::strerror(errno));
+            return false;
+        }
+        if (received < static_cast<ssize_t>(sizeof(FrameHeaderV2))) {
+            continue;  // too small, skip
+        }
+        size_t nbytes = static_cast<size_t>(received);
 #endif
 
-    // Extract header
-    std::memcpy(&header, recv_buf_.data(), sizeof(header));
+        // Extract header
+        std::memcpy(&header, recv_buf_.data(), sizeof(header));
 
-    if (header.magic != FRAME_HEADER_MAGIC) {
-        spdlog::warn("UdpConsumer: invalid frame magic 0x{:08x}", header.magic);
-        return false;
+        if (header.magic != FRAME_HEADER_MAGIC) {
+            spdlog::warn("UdpConsumer: invalid frame magic 0x{:08x}", header.magic);
+            continue;  // bad frame, skip
+        }
+
+        // Extract payload
+        size_t payload_offset = sizeof(FrameHeaderV2);
+        size_t payload_available = nbytes - payload_offset;
+
+        if (header.payload_bytes > 0 && payload_available >= header.payload_bytes) {
+            size_t num_samples = header.payload_bytes / sizeof(int16_t);
+            payload.resize(num_samples);
+            std::memcpy(payload.data(), recv_buf_.data() + payload_offset,
+                        header.payload_bytes);
+        } else {
+            payload.clear();
+        }
+
+        ++recv_count_;
+        if (recv_count_ == 1) {
+            spdlog::info("UdpConsumer: first frame received (seq={}, {}ch, {} samples/ch, {} bytes)",
+                         header.sequence, header.channel_count,
+                         header.block_length_samples, nbytes);
+        }
+
+        return true;
     }
-
-    // Extract payload
-    size_t payload_offset = sizeof(FrameHeaderV2);
-    size_t payload_available = nbytes - payload_offset;
-
-    if (header.payload_bytes > 0 && payload_available >= header.payload_bytes) {
-        size_t num_samples = header.payload_bytes / sizeof(int16_t);
-        payload.resize(num_samples);
-        std::memcpy(payload.data(), recv_buf_.data() + payload_offset,
-                    header.payload_bytes);
-    } else {
-        payload.clear();
-    }
-
-    return true;
+    return false;  // closed
 }
 
 bool UdpConsumer::send_command(const IpcCommand& /*cmd*/) {

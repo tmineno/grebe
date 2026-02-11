@@ -335,12 +335,15 @@ int main(int argc, char* argv[]) {
     // Transport producer
     std::unique_ptr<ITransportProducer> transport;
     if (opts.transport == "udp") {
-        // UDP block size cap: datagram must fit in ~65000 bytes
+        // UDP block size cap: each datagram must fit within network MTU.
+        // Use 1400 bytes max (safe for all environments including WSL2 loopback
+        // where 127.0.0.1 silently drops UDP > 1472 bytes).
+        constexpr size_t UDP_MAX_DATAGRAM = 1400;
         uint32_t max_block = static_cast<uint32_t>(
-            (65000 - sizeof(FrameHeaderV2)) / (opts.num_channels * sizeof(int16_t)));
+            (UDP_MAX_DATAGRAM - sizeof(FrameHeaderV2)) / (opts.num_channels * sizeof(int16_t)));
         if (opts.block_size > max_block) {
-            spdlog::warn("UDP block_size {} exceeds datagram limit, clamping to {}",
-                         opts.block_size, max_block);
+            spdlog::info("UDP block_size {} -> {} (MTU safe, {}ch)",
+                         opts.block_size, max_block, opts.num_channels);
             opts.block_size = max_block;
         }
         transport = std::make_unique<UdpProducer>(opts.udp_host, opts.udp_port);

@@ -249,8 +249,9 @@ int main(int argc, char* argv[]) {
             synthetic_source->stop();
             ingestion.stop();
         } else if (transport_source) {
+            // Close transport to unblock any blocking receive_frame()
+            if (udp_consumer) udp_consumer->close();
             if (pipe_consumer) pipe_consumer.reset();
-            if (udp_consumer) udp_consumer.reset();
             ingestion.stop();
             transport_source->stop();
         }

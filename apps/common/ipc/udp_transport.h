@@ -2,6 +2,7 @@
 
 #include "transport.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ private:
     int sock_ = -1;
 #endif
     struct sockaddr_in dest_addr_{};
+    uint64_t send_count_ = 0;
     std::vector<uint8_t> send_buf_;
 };
 
@@ -47,11 +49,16 @@ public:
     bool receive_frame(FrameHeaderV2& header, std::vector<int16_t>& payload) override;
     bool send_command(const IpcCommand& cmd) override;
 
+    /// Close the socket to unblock a blocking receive_frame() call.
+    void close();
+
 private:
 #ifdef _WIN32
     SOCKET sock_ = INVALID_SOCKET;
 #else
     int sock_ = -1;
 #endif
+    std::atomic<bool> closed_{false};
+    uint64_t recv_count_ = 0;
     std::vector<uint8_t> recv_buf_;
 };
