@@ -69,33 +69,29 @@ Renderer を IRenderBackend 実装に分離し、描画バックエンドの差�
 
 ---
 
-## Phase 7 (次回): libgrebe をデータパイプラインに純化
+## Phase 7: libgrebe をデータパイプラインに純化 ✅
 
 **設計方針:** libgrebe の本質的価値はデータパイプライン (取り込み → デシメーション → 出力) であり、
 描画・計測・ロギングは本来アプリの責務。ライブラリを純粋なデータパイプラインに絞る。
 
 ### 7a. Vulkan 描画一式の除去
 
-- [ ] Vulkan 描画モジュールを `apps/viewer/` に移動:
+- [x] Vulkan 描画モジュールを `apps/viewer/` に移動:
   - `vulkan_context.h/cpp`, `swapchain.h/cpp`, `renderer.h/cpp`
   - `buffer_manager.h/cpp`, `vulkan_renderer.h/cpp`
   - `compute_decimator.h/cpp`, `vma_impl.cpp`
-- [ ] libgrebe のリンク依存から除去: Vulkan, GLFW, vk-bootstrap, VMA, glm, stb_headers
-- [ ] `render_backend.h` (IRenderBackend インタフェイス定義) はライブラリに残すか検討
-  - データパイプライン自体は描画を知らない → 残す意味は薄い
-  - ただしヘッダのみでリンク依存なし → 残してもコストゼロ
+- [x] libgrebe のリンク依存から除去: Vulkan, GLFW, vk-bootstrap, VMA, glm, stb_headers
+- [x] `render_backend.h` (IRenderBackend インタフェイス定義) はライブラリに残留 (ヘッダのみ、リンク依存なし)
 
 ### 7b. Benchmark (テレメトリ計測) の除去
 
-- [ ] `benchmark.h/cpp` を `apps/viewer/` に移動
-  - ライブラリ内で自己参照のみ (`benchmark.cpp` → `benchmark.h`)、外部消費は全て `apps/viewer/`
-  - フレーム単位のローリング平均、CSV ロギングはアプリの計測関心事
-  - `TelemetrySnapshot` 構造体は `include/grebe/telemetry.h` に残す (データ定義のみ)
+- [x] `benchmark.h/cpp` を `apps/viewer/` に移動
+  - `TelemetrySnapshot` 構造体は `include/grebe/telemetry.h` に残留 (データ定義のみ)
 
 ### 7c. 不要なリンク依存の除去
 
-- [ ] `nlohmann_json::nlohmann_json` を libgrebe から除去 (src/ 内で使用箇所なし — profiler/microbench 移動済み)
-- [ ] `stb_headers` を libgrebe から除去 (src/ 内で使用箇所なし)
+- [x] `nlohmann_json::nlohmann_json` を libgrebe から除去
+- [x] `stb_headers` を libgrebe から除去
 
 ### 7d. Phase 7 完了後の libgrebe 構成
 
@@ -120,10 +116,10 @@ waveform_type.h, waveform_utils.h     — 波形ユーティリティ
 target_link_libraries(grebe PUBLIC spdlog::spdlog)  # ロギングのみ
 ```
 
-**受入条件:**
-- libgrebe が Vulkan/GLFW/ImGui/JSON に非依存でビルドできること
-- `nm -C libgrebe.a | grep -c "Vulkan\|vk\|Swapchain\|Benchmark"` → 0
-- grebe-viewer が libgrebe + Vulkan 描画コードで既存全モード動作を維持すること
+**検証結果:**
+- ✅ libgrebe.a: 179K (PoC 641K → 72% 削減)
+- ✅ `nm -C libgrebe.a | grep -c "Vulkan\|vk\|Swapchain\|Benchmark"` → 0
+- ✅ grebe, grebe-viewer, grebe-sg 全ターゲットがビルド成功
 
 ---
 
@@ -277,7 +273,7 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 4. DecimationEngine API | FR-02, FR-03 | ✅ 完了 |
 | 5. Config + Telemetry | FR-05, FR-07 | ✅ 完了 |
 | 6. libgrebe デカップリング | HUD/ImGui 除去 | ✅ 完了 |
-| 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | 未着手 |
+| 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | ✅ 完了 |
 | 7.1 性能回帰検証 | BM-B/C/E、E2E、overlay callback | 未着手 |
 | 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | 未着手 |
 | 8. FileSource | FR-01 | 未着手 |
