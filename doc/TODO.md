@@ -220,17 +220,22 @@ grebe-sg にバイナリファイル再生モードを実装。GRB ファイル�
 
 ---
 
-## Phase 9: UdpSource + grebe-udp-sender (FR-01)
+## Phase 9: UDP トランスポート (FR-01) ✅
 
-UDP ソケット経由のデータ受信参照実装とデモ送信プログラム。
+grebe-sg に UDP 送信トランスポートを追加し、grebe-viewer に UdpConsumer 受信を実装。
+grebe-sg が既存の波形生成・ファイル再生機能をそのまま UDP 経由で送信できる構成とする。
 
-- [ ] UdpSource 実装 (POSIX ソケット / Winsock、外部依存なし)
-- [ ] grebe-udp-sender デモプログラム (SyntheticSource 相当の波形を UDP 送信)
-- [ ] ローカルループバック (127.0.0.1) での E2E パイプライン検証
+- [x] IpcSource → TransportSource リネーム (トランスポート非依存の命名)
+- [x] UdpProducer / UdpConsumer 実装 (POSIX ソケット / Winsock、外部依存なし)
+- [x] grebe-sg に UDP 送信モード追加 (`--transport=pipe|udp`, `--udp-target=HOST:PORT`)
+- [x] grebe-sg GUI にトランスポート表示 (読み取り専用)
+- [x] grebe-viewer `--udp=PORT` CLI オプション
+- [x] UDP ブロックサイズ自動制限 (データグラム 65000 byte 上限)
+- [x] Linux + Windows MSVC ビルド検証
 
 **受入条件:**
-- grebe-udp-sender → UdpSource → grebe-viewer でリアルタイム波形描画が動作すること
-- ループバックで 1ch × 10 MSPS 以上のストリーミングが安定動作 (0 drops)
+- grebe-sg (UDP) → UdpConsumer → TransportSource → grebe-viewer でリアルタイム波形描画が動作すること ✅
+- ループバックで 1ch × 10 MSPS 以上のストリーミングが安定動作 (0 drops) — E2E 検証待ち
 
 ---
 
@@ -276,8 +281,8 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 6. libgrebe デカップリング | HUD/ImGui 除去 | ✅ 完了 |
 | 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | ✅ 完了 |
 | 7.1 性能回帰検証 | R-1〜R-6 全 PASS | ✅ 完了 |
-| 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | 未着手 |
+| 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | ✅ 完了 |
 | 8. FileSource | FR-01 | ✅ 完了 |
-| 9. UdpSource | FR-01 | 未着手 |
+| 9. UDP トランスポート | FR-01 | ✅ 完了 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
 | 11. クロスプラットフォーム | NFR-06 | 未着手 |

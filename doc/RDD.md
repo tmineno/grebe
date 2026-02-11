@@ -115,48 +115,80 @@ PoC (v0.1.0, TR-001) において以下が定量的に検証された：
 
 ### 3.1 コンポーネント構成
 
+システムは 3 つの独立した成果物で構成される：**libgrebe**（コアデータパイプライン）、**grebe-viewer**（波形描画アプリケーション）、**grebe-sg**（信号発生器プロセス）。
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ アプリケーション (grebe-viewer, grebe-sg 等)                  │
-│                                                              │
-│  ┌───────────┐  ┌──────────────┐  ┌────────────────────┐    │
-│  │ UI / HUD  │  │ DataSource   │  │ Telemetry          │    │
-│  │ (ImGui等) │  │ 実装         │  │ Consumer           │    │
-│  └─────┬─────┘  │ (IpcSource等)│  │ (Benchmark, CSV等) │    │
-│        │        └──────┬───────┘  └─────────┬──────────┘    │
-│        │               │                    │                │
-│  ┌─────▼─────────────┐ │                    │                │
-│  │ VulkanRenderer     │ │                    │                │
-│  │ (IRenderBackend    │ │                    │                │
-│  │  実装)             │ │                    │                │
-│  └─────┬─────────────┘ │                    │                │
-│        │               │                    │                │
-├────────┼───────────────┼────────────────────┼────────────────┤
-│ libgrebe (コアライブラリ — 純粋データパイプライン)             │
-│        │               │                    │                │
-│  ┌─────▼──────┐  ┌─────▼──────┐  ┌─────────▼──────────┐    │
-│  │IRender     │  │ IDataSource│  │ PipelineConfig     │    │
-│  │Backend     │  │ (abstract) │  │ TelemetrySnapshot  │    │
-│  │(abstract,  │  │            │  │ (データ定義のみ)     │    │
-│  │ header only│  └─────┬──────┘  └────────────────────┘    │
-│  └────────────┘        │                                    │
-│              ┌─────────▼──────────┐                         │
-│              │ IngestionThread    │                         │
-│              │ (DataSource→Ring)  │                         │
-│              └─────────┬──────────┘                         │
-│              ┌─────────▼──────────┐                         │
-│              │ N × RingBuffer     │                         │
-│              │ (lock-free SPSC)   │                         │
-│              └─────────┬──────────┘                         │
-│              ┌─────────▼──────────┐                         │
-│              │ DecimationEngine   │                         │
-│              │ (single worker     │                         │
-│              │  thread, N ch)     │                         │
-│              └────────────────────┘                         │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────┐     ┌──────────────────────────────┐
+│ grebe-sg (Signal Generator)           │     │ grebe-viewer (Waveform Viewer)│
+│                                       │     │                              │
+│  ┌─────────────┐ ┌──────────────┐    │     │  ┌──────────────────────┐    │
+│  │DataGenerator │ │ FileReader   │    │     │  │ TransportSource      │    │
+│  │(Synthetic)   │ │ (GRB File)   │    │     │  │ (IDataSource impl)   │    │
+│  └──────┬───────┘ └──────┬───────┘    │     │  └──────────┬───────────┘    │
+│         │                │            │     │             │                │
+│         ▼                ▼            │     │  ┌──────────▼───────────┐    │
+│  ┌──────────────────────────┐        │     │  │ IngestionThread      │    │
+│  │ N × RingBuffer           │        │     │  │ (DataSource→Ring)    │    │
+│  └──────────┬───────────────┘        │     │  └──────────┬───────────┘    │
+│             │                         │     │             │                │
+│  ┌──────────▼───────────────┐        │     │  ┌──────────▼───────────┐    │
+│  │ sender_thread            │        │     │  │ N × RingBuffer       │    │
+│  │ (drain → frame → send)  │        │     │  └──────────┬───────────┘    │
+│  └──────────┬───────────────┘        │     │             │                │
+│             │                         │     │  ┌──────────▼───────────┐    │
+│  ┌──────────▼───────────────┐        │     │  │ DecimationEngine     │    │
+│  │ ITransportProducer       │        │     │  └──────────┬───────────┘    │
+│  │  ├─ PipeProducer (stdout)│        │     │             │                │
+│  │  └─ UdpProducer (socket) │        │     │  ┌──────────▼───────────┐    │
+│  └──────────┬───────────────┘        │     │  │ VulkanRenderer       │    │
+│             │                         │     │  │ (IRenderBackend)     │    │
+│  ┌──────────▼──────┐                 │     │  └──────────┬───────────┘    │
+│  │ GUI (OpenGL     │                 │     │             │                │
+│  │  + ImGui)       │                 │     │  ┌──────────▼───────────┐    │
+│  └─────────────────┘                 │     │  │ HUD (ImGui overlay)  │    │
+│                                       │     │  │ Benchmark, Profiler  │    │
+│  Responsibility:                      │     │  └──────────────────────┘    │
+│  - Signal generation (synthetic)      │     │                              │
+│  - File playback (GRB format)         │     │  ┌──────────────────────┐    │
+│  - Transport framing (FrameHeaderV2)  │     │  │ ITransportConsumer   │    │
+│  - GUI for source/rate/waveform ctrl  │     │  │  ├─ PipeConsumer     │    │
+│                                       │     │  │  └─ UdpConsumer      │    │
+└────────────────┬──────────────────────┘     │  └──────────────────────┘    │
+                 │                             │                              │
+                 │  Transport (選択可能)        │  Responsibility:             │
+                 │  ┌────────────────────┐     │  - Vulkan wave rendering     │
+                 ├──┤ Pipe (stdout/stdin)├──▶──│  - Data pipeline (libgrebe)  │
+                 │  └────────────────────┘     │  - Telemetry/profiling       │
+                 │  ┌────────────────────┐     │  - HUD (ImGui overlay)       │
+                 └──┤ UDP (socket)       ├──▶──│  - Process management        │
+                    └────────────────────┘     │    (pipe mode: spawn sg)     │
+                                               └──────────────────────────────┘
+
+                 ┌───────────────────────────────────────────────────────┐
+                 │ libgrebe (Core Library — Pure Data Pipeline)          │
+                 │                                                       │
+                 │  Interfaces (header-only):                            │
+                 │    IDataSource, IRenderBackend                        │
+                 │    PipelineConfig, TelemetrySnapshot, DrawCommand     │
+                 │                                                       │
+                 │  Pipeline components:                                  │
+                 │    SyntheticSource, IngestionThread,                   │
+                 │    RingBuffer (SPSC), DecimationEngine                │
+                 │    (MinMax SSE2 SIMD + LTTB)                          │
+                 │                                                       │
+                 │  Dependency: spdlog only                              │
+                 └───────────────────────────────────────────────────────┘
 ```
 
-**libgrebe の責務は純粋なデータパイプライン（取り込み → リングバッファ → デシメーション → 出力）のみ。** 描画 (VulkanRenderer)、UI (HUD/ImGui)、テレメトリ計測 (Benchmark)、IPC トランスポート (PipeTransport) はすべてアプリケーション側に配置される。ライブラリは抽象インタフェイス定義（`IDataSource`, `IRenderBackend`）とデータ型定義（`TelemetrySnapshot`, `PipelineConfig`, `DrawCommand` 等）をヘッダとして提供する。
+#### 動作モード
+
+| モード | grebe-viewer CLI | grebe-sg | トランスポート | 備考 |
+|--------|-----------------|----------|---------------|------|
+| Pipe (デフォルト) | `grebe-viewer` | 自動起動 (subprocess) | stdout/stdin パイプ | grebe-viewer が grebe-sg を自動 spawn |
+| UDP | `grebe-viewer --udp=5000` | 手動起動 `grebe-sg --transport=udp` | UDP ソケット | 独立プロセス、ネットワーク越しも可能 |
+| Embedded | `grebe-viewer --embedded` | 不使用 | なし | SyntheticSource 内蔵、テスト/デモ用 |
+
+**libgrebe の責務は純粋なデータパイプライン（取り込み → リングバッファ → デシメーション → 出力）のみ。** 描画 (VulkanRenderer)、UI (HUD/ImGui)、テレメトリ計測 (Benchmark)、トランスポート (PipeTransport, UdpTransport) はすべてアプリケーション側に配置される。ライブラリは抽象インタフェイス定義（`IDataSource`, `IRenderBackend`）とデータ型定義（`TelemetrySnapshot`, `PipelineConfig`, `DrawCommand` 等）をヘッダとして提供する。
 
 ### 3.2 主要抽象インタフェイス
 
@@ -201,7 +233,7 @@ public:
 
 **実装済みの IDataSource:**
 - **SyntheticSource** (`src/synthetic_source.h`): libgrebe 同梱、合成波形生成
-- **IpcSource** (`apps/viewer/ipc_source.h`): grebe-viewer 同梱、grebe-sg からのパイプ受信
+- **TransportSource** (`apps/viewer/transport_source.h`): grebe-viewer 同梱、任意の ITransportConsumer (Pipe/UDP) からの受信
 
 **設計判断: コピーベースを v1.0 のデフォルトとする根拠**
 
@@ -248,7 +280,7 @@ public:
 
 ### 3.3 フレームプロトコル
 
-PoC で実装・検証済みの FrameHeaderV2。IPC パイプ通信で使用される。FrameHeaderV2 は libgrebe 外（`apps/common/ipc/contracts.h`）に配置され、grebe-viewer と grebe-sg の間で共有される。
+PoC で実装・検証済みの FrameHeaderV2。IPC パイプおよび UDP トランスポートで共通使用される。FrameHeaderV2 は libgrebe 外（`apps/common/ipc/contracts.h`）に配置され、grebe-viewer と grebe-sg の間で共有される。
 
 ```cpp
 struct FrameHeaderV2 {
@@ -266,7 +298,7 @@ struct FrameHeaderV2 {
 };
 ```
 
-libgrebe 内部で使用するフレーム形式は `grebe::FrameBuffer`（`include/grebe/data_source.h`）であり、IPC ヘッダからの変換は IpcSource（アプリケーション側）が行う。
+libgrebe 内部で使用するフレーム形式は `grebe::FrameBuffer`（`include/grebe/data_source.h`）であり、フレームヘッダからの変換は TransportSource（アプリケーション側）が行う。
 
 ### 3.4 検証済み設計制約 (TR-001 由来)
 
@@ -321,10 +353,11 @@ struct GrbFileHeader {        // 32 bytes, little-endian
 - ライブラリは以下の参照実装を同梱する：
   - **SyntheticSource** (実装済み): 合成信号生成（正弦波、矩形波、鋸歯状波、ホワイトノイズ、チャープ）
 - アプリケーション同梱の IDataSource 実装：
-  - **IpcSource** (実装済み): grebe-sg からの IPC パイプ受信（grebe-viewer 同梱、`apps/viewer/`）
-- 将来の参照実装（未実装）：
-  - **FileSource**: バイナリファイルからの再生
-  - **UdpSource**: UDP ソケット経由のデータ受信（grebe-udp-sender デモプログラムと対）
+  - **TransportSource** (実装済み): 任意の ITransportConsumer 経由の受信（grebe-viewer 同梱、`apps/viewer/`）
+    - PipeConsumer: grebe-sg サブプロセスからの IPC パイプ受信
+    - UdpConsumer: 外部 grebe-sg からの UDP ソケット受信
+- grebe-sg 同梱のデータソース：
+  - **FileReader** (実装済み): GRB バイナリファイルの再生（mmap + ペーシング）
 - 外部実装（高帯域 NIC (DPDK/AF_XDP)、USB3、PCIe）はアプリケーション側で IDataSource を実装して注入する
 
 ### FR-02: デシメーションエンジン
@@ -437,9 +470,8 @@ PoC 実績（TR-001 §概要）を基準とした性能目標。環境: x86_64, 
 | 成果物 | 状態 | 説明 |
 |--------|------|------|
 | grebe-viewer | 実装済み | 参照実装ビューア（Vulkan + ImGui + IPC + プロファイラ + ベンチマーク） |
-| grebe-sg | 実装済み | 信号発生器プロセス（OpenGL + ImGui GUI、IPC パイプ出力、grebe-viewer から自動起動） |
+| grebe-sg | 実装済み | 信号発生器プロセス（OpenGL + ImGui GUI、Pipe/UDP トランスポート選択、grebe-viewer から自動起動 or 独立実行） |
 | grebe-bench | スタブ | パフォーマンスベンチマークスイート（libgrebe API ベース移行予定） |
-| grebe-udp-sender | 未実装 | UdpSource 検証用の UDP 送信デモ（将来） |
 
 ### 6.3 ドキュメント
 
@@ -486,7 +518,8 @@ PoC (v0.1.0) の主要コンポーネントと現在のモジュール配置の�
 | Profiler | profiler.h/cpp | `apps/viewer/profiler.h/cpp` (grebe-viewer) | 自動プロファイリング + JSON レポート |
 | HUD | hud.h/cpp | `apps/viewer/hud.h/cpp` (grebe-viewer) | ImGui テレメトリ表示 |
 | PipeTransport | ipc/pipe_transport.h/cpp | `apps/common/ipc/` (grebe-viewer/sg 共有) | IPC パイプ実装 |
-| IpcSource | *(Phase 2 で新設)* | `apps/viewer/ipc_source.h/cpp` (grebe-viewer) | IDataSource 実装 (IPC パイプ) |
+| UdpTransport | *(Phase 9 で新設)* | `apps/common/ipc/udp_transport.h/cpp` (grebe-viewer/sg 共有) | UDP ソケット実装 |
+| TransportSource | *(Phase 2 で IpcSource として新設、Phase 9 でリネーム)* | `apps/viewer/transport_source.h/cpp` (grebe-viewer) | IDataSource 実装 (任意の ITransportConsumer) |
 | EnvelopeVerifier | envelope_verifier.h/cpp | `apps/viewer/envelope_verifier.h/cpp` (grebe-viewer) | プロファイラ内の検証ロジック |
 | ProcessHandle | process_handle.h/cpp | `apps/viewer/process_handle.h/cpp` (grebe-viewer) | grebe-sg サブプロセス起動 |
 
@@ -508,7 +541,7 @@ PoC (v0.1.0) の主要コンポーネントと現在のモジュール配置の�
 
 ## 付録 C: IDataSource 参照実装パターン
 
-各デバイス種別における IDataSource 実装の想定構成を示す。現時点で実装済みなのは SyntheticSource（libgrebe 同梱）と IpcSource（grebe-viewer 同梱）のみ。FileSource、UdpSource は将来実装予定。他はアプリケーション側の実装例として位置づける。
+各デバイス種別における IDataSource 実装の想定構成を示す。現時点で実装済みなのは SyntheticSource（libgrebe 同梱）、TransportSource（grebe-viewer 同梱、Pipe/UDP 対応）、FileReader（grebe-sg 同梱）。他はアプリケーション側の実装例として位置づける。
 
 ### C.1 SyntheticSource（libgrebe 同梱、実装済み）
 
@@ -546,28 +579,29 @@ RingBuffer → sender_thread → IPC pipe → grebe-viewer
 - ループ再生: EOF 時に読み取り位置をリセットしてシームレスループ
 - GUI 操作: grebe-sg の GUI から Source: File を選択し、ファイルパスを入力して Load
 
-### C.3 UdpSource（将来実装予定）
+### C.3 UDP トランスポート（Phase 9 実装済み）
 
-UDP ソケット経由で ADC サンプルを受信する参照実装。OS 標準のソケット API のみを使用し、外部ライブラリ依存なしでネットワーク入力パスを検証できる。
+grebe-sg の UDP 送信モードと grebe-viewer の UdpConsumer により、ネットワーク越しのデータストリーミングを実現する。OS 標準のソケット API のみを使用し、外部ライブラリ依存なし。
 
 ```
-grebe-udp-sender (デモプログラム)              UdpSource (libgrebe 同梱)
-  │ SyntheticSource 相当の波形生成               │ recvmmsg() / WSARecvFrom()
-  │ → FrameHeader + int16_t[] を                │ → UDP ペイロードから
-  │   UDP パケットとして送信                      │   FrameHeader + サンプルを復元
-  │ → ローカルループバック (127.0.0.1)            │ → FrameBuffer にコピー
-  │   or 別ホストからの送信                       │
-  └──────── UDP ──────────────────────────────────▶ libgrebe RingBuffer
+grebe-sg (--transport=udp)                     grebe-viewer (--udp=PORT)
+  │ DataGenerator / FileReader                   │
+  │ → RingBuffer → sender_thread                 │ UdpConsumer (recvfrom)
+  │ → UdpProducer (sendto)                       │ → TransportSource (IDataSource)
+  │ → FrameHeaderV2 + int16_t[] を               │ → IngestionThread → RingBuffer
+  │   単一 UDP データグラムとして送信              │ → DecimationEngine → 描画
+  └──────── UDP (127.0.0.1 or network) ──────────▶
 ```
 
 - バッファ所有権: カーネルソケットバッファ → FrameBuffer にコピー
-- 通知: ブロッキング recv / epoll / IOCP（プラットフォーム依存）
+- 通知: ブロッキング recvfrom
 - 帯域制約: ループバック ≈ 数 GB/s、1 GbE ≈ 125 MB/s（≈ 62.5 MSPS × 1ch）
+- データグラムサイズ上限: 65000 bytes（block_size は自動制限される）
 - 外部依存: なし（POSIX ソケット / Winsock のみ）
-- クロスプラットフォーム: Linux / Windows 双方で動作すること
-- 検証戦略: grebe-udp-sender をローカルループバックで実行し、実デバイスなしで E2E パイプラインを検証
+- クロスプラットフォーム: Linux / Windows 双方で動作
+- 検証方法: grebe-sg を `--transport=udp` で起動し、grebe-viewer を `--udp=5000` で接続
 
-> **高帯域 NIC (DPDK / AF_XDP)**: 10 GbE 以上の帯域が必要な場合は、アプリケーション側で AF_XDP (libbpf) or DPDK (librte_*) を用いた IDataSource を実装して注入する。UdpSource のプロトコル処理部分を参考にできる。
+> **高帯域 NIC (DPDK / AF_XDP)**: 10 GbE 以上の帯域が必要な場合は、アプリケーション側で AF_XDP (libbpf) or DPDK (librte_*) を用いた IDataSource を実装して注入する。UdpConsumer のプロトコル処理部分を参考にできる。
 
 ### C.4 PCIe FPGA/ADC カード（アプリケーション実装例）
 
