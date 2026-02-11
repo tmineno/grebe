@@ -60,7 +60,12 @@ private:
     void cleanup_mmap();
 
     std::string path_;
+#ifdef _WIN32
+    void* file_handle_ = nullptr;   // HANDLE (INVALID_HANDLE_VALUE)
+    void* mapping_handle_ = nullptr; // HANDLE
+#else
     int fd_ = -1;
+#endif
     void* mapped_ = nullptr;
     size_t mapped_size_ = 0;
     const int16_t* sample_data_ = nullptr;  // pointer past header into mmap

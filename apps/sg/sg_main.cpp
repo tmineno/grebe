@@ -9,7 +9,7 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
-#include <imfilebrowser.h>
+#include "tinyfiledialogs.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
@@ -338,11 +338,6 @@ int main(int argc, char* argv[]) {
     std::string file_error_msg;
     bool file_loop = true;
 
-    // ImGui file browser dialog
-    ImGui::FileBrowser file_dialog;
-    file_dialog.SetTitle("Open GRB File");
-    file_dialog.SetTypeFilters({".grb"});
-
     // Helper: flush all ring buffers
     auto flush_rings = [&]() {
         for (auto* rb : ring_ptrs) {
@@ -567,9 +562,47 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // --- Load new file ---
+                // --- Load new file (native OS dialog) ---
                 if (ImGui::Button("Open File...", ImVec2(-1, 0))) {
-                    file_dialog.Open();
+                    char const* filter_patterns[] = {"*.grb"};
+                    char const* selected = tinyfd_openFileDialog(
+                        "Open GRB File", "", 1, filter_patterns, "GRB files (*.grb)", 0);
+                    if (selected) {
+                        std::string new_path(selected);
+                        spdlog::info("File selected: {}", new_path);
+                        file_error_msg.clear();
+                        try {
+                            auto new_reader = std::make_unique<FileReader>(new_path);
+                            if (new_reader->channel_count() != opts.num_channels) {
+                                file_error_msg = "Channel mismatch: file has " +
+                                    std::to_string(new_reader->channel_count()) +
+                                    "ch, expected " + std::to_string(opts.num_channels);
+                                spdlog::error("{}", file_error_msg);
+                            } else {
+                                if (source_mode == SourceMode::Synthetic) {
+                                    data_gen.stop();
+                                } else if (file_reader) {
+                                    file_reader->stop();
+                                }
+                                flush_rings();
+
+                                file_reader = std::move(new_reader);
+                                file_reader->set_looping(file_loop);
+                                file_reader->start(ring_ptrs, drop_ptrs);
+                                current_sample_rate.store(
+                                    file_reader->target_sample_rate(),
+                                    std::memory_order_relaxed);
+                                source_mode = SourceMode::File;
+                                source_sel = 1;
+                                spdlog::info("Loaded file: {} ({}ch, {:.0f} SPS)",
+                                             new_path, file_reader->channel_count(),
+                                             file_reader->target_sample_rate());
+                            }
+                        } catch (const std::exception& e) {
+                            file_error_msg = e.what();
+                            spdlog::error("Failed to load file: {}", file_error_msg);
+                        }
+                    }
                 }
                 if (!file_error_msg.empty()) {
                     ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", file_error_msg.c_str());
@@ -589,48 +622,6 @@ int main(int argc, char* argv[]) {
             }
 
             ImGui::End();
-
-            // File browser dialog (rendered as separate popup window)
-            file_dialog.Display();
-            if (file_dialog.HasSelected()) {
-                std::string new_path = file_dialog.GetSelected().string();
-                file_dialog.ClearSelected();
-                spdlog::info("File selected: {}", new_path);
-                file_error_msg.clear();
-                try {
-                    auto new_reader = std::make_unique<FileReader>(new_path);
-                    if (new_reader->channel_count() != opts.num_channels) {
-                        file_error_msg = "Channel mismatch: file has " +
-                            std::to_string(new_reader->channel_count()) +
-                            "ch, expected " + std::to_string(opts.num_channels);
-                        spdlog::error("{}", file_error_msg);
-                    } else {
-                        // Stop current source
-                        if (source_mode == SourceMode::Synthetic) {
-                            data_gen.stop();
-                        } else if (file_reader) {
-                            file_reader->stop();
-                        }
-                        flush_rings();
-
-                        file_reader = std::move(new_reader);
-                        file_reader->set_looping(file_loop);
-                        file_reader->start(ring_ptrs, drop_ptrs);
-                        current_sample_rate.store(
-                            file_reader->target_sample_rate(),
-                            std::memory_order_relaxed);
-                        source_mode = SourceMode::File;
-                        source_sel = 1;
-                        spdlog::info("Loaded file: {} ({}ch, {:.0f} SPS)",
-                                     new_path, file_reader->channel_count(),
-                                     file_reader->target_sample_rate());
-                    }
-                } catch (const std::exception& e) {
-                    file_error_msg = e.what();
-                    spdlog::error("Failed to load file: {}", file_error_msg);
-                }
-            }
-
             ImGui::Render();
 
             int display_w, display_h;

@@ -120,15 +120,21 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-# imgui-filebrowser (single-header ImGui file dialog)
+# tinyfiledialogs (native OS file dialogs — no CMake support, fetch source only)
 FetchContent_Declare(
-    imgui_filebrowser
-    GIT_REPOSITORY https://github.com/AirGuanZ/imgui-filebrowser.git
+    tinyfiledialogs
+    GIT_REPOSITORY https://github.com/native-toolkit/libtinyfiledialogs.git
     GIT_TAG        master
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(glfw vk-bootstrap VulkanMemoryAllocator glm spdlog json stb imgui imgui_filebrowser)
+FetchContent_MakeAvailable(glfw vk-bootstrap VulkanMemoryAllocator glm spdlog json stb imgui)
+
+# Populate tinyfiledialogs separately (no CMakeLists.txt in repo)
+FetchContent_GetProperties(tinyfiledialogs)
+if(NOT tinyfiledialogs_POPULATED)
+    FetchContent_Populate(tinyfiledialogs)
+endif()
 
 # stb interface library
 add_library(stb_headers INTERFACE)
@@ -302,12 +308,14 @@ add_executable(grebe-sg
     apps/sg/file_reader.cpp
     # IPC transport (shared with grebe-viewer, Phase 7.2)
     apps/common/ipc/pipe_transport.cpp
+    # Native file dialogs
+    ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
 )
 
 target_include_directories(grebe-sg PRIVATE
     ${CMAKE_SOURCE_DIR}/apps/sg
     ${CMAKE_SOURCE_DIR}/apps/common
-    ${imgui_filebrowser_SOURCE_DIR}
+    ${tinyfiledialogs_SOURCE_DIR}
 )
 
 target_link_libraries(grebe-sg PRIVATE

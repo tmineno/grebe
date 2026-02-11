@@ -9,12 +9,53 @@
 #include <stdexcept>
 #include <thread>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 FileReader::FileReader(const std::string& path) : path_(path) {
+#ifdef _WIN32
+    // --- Windows: CreateFile + CreateFileMapping + MapViewOfFile ---
+    file_handle_ = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file_handle_ == INVALID_HANDLE_VALUE) {
+        file_handle_ = nullptr;
+        throw std::runtime_error("FileReader: cannot open " + path);
+    }
+
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(file_handle_, &file_size) ||
+        file_size.QuadPart < static_cast<LONGLONG>(sizeof(GrbFileHeader))) {
+        CloseHandle(file_handle_);
+        file_handle_ = nullptr;
+        throw std::runtime_error("FileReader: file too small or size query failed: " + path);
+    }
+
+    mapped_size_ = static_cast<size_t>(file_size.QuadPart);
+    mapping_handle_ = CreateFileMappingA(file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping_handle_) {
+        CloseHandle(file_handle_);
+        file_handle_ = nullptr;
+        throw std::runtime_error("FileReader: CreateFileMapping failed: " + path);
+    }
+
+    mapped_ = MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, 0);
+    if (!mapped_) {
+        CloseHandle(mapping_handle_);
+        mapping_handle_ = nullptr;
+        CloseHandle(file_handle_);
+        file_handle_ = nullptr;
+        throw std::runtime_error("FileReader: MapViewOfFile failed: " + path);
+    }
+#else
+    // --- POSIX: open + mmap ---
     fd_ = open(path.c_str(), O_RDONLY);
     if (fd_ < 0) {
         throw std::runtime_error("FileReader: cannot open " + path);
@@ -37,6 +78,7 @@ FileReader::FileReader(const std::string& path) : path_(path) {
     }
 
     madvise(mapped_, mapped_size_, MADV_SEQUENTIAL);
+#endif
 
     // Read and validate header
     std::memcpy(&header_, mapped_, sizeof(GrbFileHeader));
@@ -86,6 +128,20 @@ FileReader::~FileReader() {
 }
 
 void FileReader::cleanup_mmap() {
+#ifdef _WIN32
+    if (mapped_) {
+        UnmapViewOfFile(mapped_);
+        mapped_ = nullptr;
+    }
+    if (mapping_handle_) {
+        CloseHandle(mapping_handle_);
+        mapping_handle_ = nullptr;
+    }
+    if (file_handle_) {
+        CloseHandle(file_handle_);
+        file_handle_ = nullptr;
+    }
+#else
     if (mapped_) {
         munmap(mapped_, mapped_size_);
         mapped_ = nullptr;
@@ -94,6 +150,7 @@ void FileReader::cleanup_mmap() {
         close(fd_);
         fd_ = -1;
     }
+#endif
 }
 
 void FileReader::start(std::vector<RingBuffer<int16_t>*> rings,
