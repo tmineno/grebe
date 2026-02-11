@@ -42,7 +42,13 @@ int parse_cli(int argc, char* argv[], CliOptions& opts) {
                 spdlog::error("--block-size must be power of 2, 1024-65536, got {}", opts.block_size);
                 return 1;
             }
+        } else if (arg.rfind("--file=", 0) == 0) {
+            opts.file_path = arg.substr(7);
         }
+    }
+    if (!opts.file_path.empty() && opts.embedded) {
+        spdlog::error("--file and --embedded are mutually exclusive");
+        return 1;
     }
     return 0;
 }

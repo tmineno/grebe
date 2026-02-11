@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 struct CliOptions {
     bool enable_log = false;
@@ -13,6 +14,7 @@ struct CliOptions {
     uint32_t block_size = 16384;    // IPC block size (samples/channel/frame)
     bool no_vsync = false;          // --no-vsync: disable V-Sync
     bool minimized = false;         // --minimized: start window iconified
+    std::string file_path;          // --file=PATH: binary file playback via grebe-sg
 };
 
 // Returns 0 on success, non-zero on error (caller should exit with that code).

@@ -160,6 +160,9 @@ int main(int argc, char* argv[]) {
             if (pipeline_config.ring_buffer_size != 67'108'864) {
                 sg_args.push_back("--ring-size=" + std::to_string(pipeline_config.ring_buffer_size));
             }
+            if (!opts.file_path.empty()) {
+                sg_args.push_back("--file=" + opts.file_path);
+            }
 
             sg_process = std::make_unique<ProcessHandle>();
             int stdin_fd = -1, stdout_fd = -1;

@@ -291,6 +291,7 @@ endif()
 add_executable(grebe-sg
     apps/sg/sg_main.cpp
     apps/sg/data_generator.cpp
+    apps/sg/file_reader.cpp
     # IPC transport (shared with grebe-viewer, Phase 7.2)
     apps/common/ipc/pipe_transport.cpp
 )

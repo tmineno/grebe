@@ -100,6 +100,7 @@ In IPC mode, sample rate and pause are controlled via the grebe-sg GUI window.
 | Option | Default | Description |
 |---|---|---|
 | `--embedded` | off | Single-process mode (no grebe-sg) |
+| `--file=PATH` | | Binary file playback (`.grb` format, via grebe-sg) |
 | `--channels=N` | 1 | Number of channels (1-8) |
 | `--ring-size=SIZE` | 64M | Ring buffer size (K/M/G suffix supported) |
 | `--block-size=SIZE` | 16384 | IPC block size per channel per frame |
@@ -118,6 +119,7 @@ grebe-sg is spawned automatically by grebe-viewer in IPC mode. It provides an Op
 | `--channels=N` | 1 | Number of channels (1-8) |
 | `--ring-size=SIZE` | 64M | Ring buffer size |
 | `--block-size=SIZE` | 16384 | Samples per channel per IPC frame |
+| `--file=PATH` | | Binary file playback (`.grb` format) |
 
 ### Examples
 
@@ -133,6 +135,10 @@ grebe-sg is spawned automatically by grebe-viewer in IPC mode. It provides an Op
 
 # Isolated microbenchmarks
 ./build/grebe-viewer --bench
+
+# Binary file playback
+python scripts/generate_grb.py --channels=1 --rate=100e6 --duration=5 --waveform=sine -o ./tmp/test.grb
+./build/grebe-viewer --file=./tmp/test.grb
 ```
 
 ## Benchmarks

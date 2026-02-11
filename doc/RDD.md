@@ -281,6 +281,36 @@ libgrebe 内部で使用するフレーム形式は `grebe::FrameBuffer`（`incl
 | ロックフリー SPSC リングバッファでスレッド間結合 | atomic のみ、mutex なし、<0.3% 充填率 @ 1 GSPS | §2.3 |
 | GPU アップロードはトリプルバッファリングで重畳 | 書込/転送/描画を独立スロットで並行 | §2.5 |
 
+### 3.5 GRB ファイルフォーマット
+
+バイナリファイル再生用のファイルフォーマット。grebe-sg がファイルを読み取り、IPC パイプ経由で grebe-viewer にストリーミングする。
+
+```c++
+struct GrbFileHeader {        // 32 bytes, little-endian
+    uint32_t magic;           // 'GRB1' = 0x31425247
+    uint32_t version;         // 1
+    uint32_t channel_count;   // 1–8
+    uint32_t reserved;        // 0（パディング）
+    double   sample_rate_hz;  // サンプルレート (Hz)
+    uint64_t total_samples;   // チャネルあたりのサンプル数
+};
+```
+
+**ペイロード配置:** ヘッダ直後にチャネルメジャー順で `int16_t` サンプルが連続する。
+
+```
+[GrbFileHeader (32B)]
+[ch0_sample_0 .. ch0_sample_{N-1}]    // N = total_samples
+[ch1_sample_0 .. ch1_sample_{N-1}]
+...
+[ch{M-1}_sample_0 .. ch{M-1}_sample_{N-1}]  // M = channel_count
+```
+
+- **ファイルサイズ:** `32 + channel_count × total_samples × 2` bytes
+- **バイトオーダー:** リトルエンディアン（x86/ARM ネイティブ）
+- **制約:** channel_count 1–8, total_samples ≥ 1
+- **生成ツール:** `scripts/generate_grb.py`
+
 ---
 
 ## 4. 機能要件
@@ -497,22 +527,24 @@ libgrebe RingBuffer
 - 通知: 同期（read_frame がデータ生成してすぐ返る）
 - 帯域制約: CPU 速度依存（PoC 実績: ≥ 1 GSPS @ period tiling）
 
-### C.2 FileSource（将来実装予定）
+### C.2 FileReader（grebe-sg 実装済み、Phase 8）
 
-キャプチャ済みバイナリファイルの再生。
+GRB バイナリファイルの再生。grebe-sg 内の FileReader が mmap でファイルを読み取り、DataGenerator と同じリングバッファ経由で IPC パイプにストリーミングする。ファイルフォーマットは §3.5 参照。
 
 ```
-FileSource
+grebe-sg (FileReader)
   │ mmap(file) + madvise(MADV_SEQUENTIAL)
-  │ → mmap 領域から直接 FrameBuffer にコピー
+  │ → mmap 領域から RingBuffer に push_bulk
   │ → サンプルレートに応じたペーシング
   ▼
-libgrebe RingBuffer
+RingBuffer → sender_thread → IPC pipe → grebe-viewer
 ```
 
-- バッファ所有権: カーネルページキャッシュ → FrameBuffer にコピー
+- バッファ所有権: カーネルページキャッシュ → RingBuffer にコピー
 - 通知: 同期（mmap アクセスはページフォルトで暗黙ブロック）
 - 帯域制約: NVMe SSD で 5–7 GB/s（1 GSPS = 2 GB/s に対し十分）
+- ループ再生: EOF 時に読み取り位置をリセットしてシームレスループ
+- GUI 操作: grebe-sg の GUI から Source: File を選択し、ファイルパスを入力して Load
 
 ### C.3 UdpSource（将来実装予定）
 

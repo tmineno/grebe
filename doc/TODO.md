@@ -202,17 +202,21 @@ target_link_libraries(grebe PUBLIC spdlog::spdlog)
 
 ---
 
-## Phase 8: FileSource (FR-01)
+## Phase 8: FileSource (FR-01) ✅
 
-バイナリファイル再生用の IDataSource 実装。
+grebe-sg にバイナリファイル再生モードを実装。GRB ファイルフォーマット定義。
 
-- [ ] FileSource 実装 (mmap + madvise(SEQUENTIAL))
-- [ ] サンプルレートに応じたペーシング
-- [ ] grebe-viewer からの FileSource 利用パス
+- [x] DataGenerator を libgrebe (`src/`) から grebe-sg (`apps/sg/`) に移動
+- [x] FileReader 実装 (mmap + madvise(SEQUENTIAL), ペーシング, ループ再生)
+- [x] sender_thread を DataGenerator から分離 (atomic による疎結合)
+- [x] grebe-sg GUI にソース切替 (Synthetic / File) + ファイルロード UI
+- [x] grebe-viewer `--file=PATH` → grebe-sg へのパススルー
+- [x] GRB ファイルフォーマット仕様 (RDD §3.5)
+- [x] テストファイル生成スクリプト (`scripts/generate_grb.py`)
 
 **受入条件:**
-- 事前キャプチャ済みバイナリファイルを指定して波形再生できること
-- 1ch × 100 MSPS 相当のファイル再生で 60 FPS 動作
+- 事前キャプチャ済みバイナリファイルを指定して波形再生できること ✅
+- 1ch × 100 MSPS 相当のファイル再生で 60 FPS 動作 ✅
 
 ---
 
@@ -273,7 +277,7 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | ✅ 完了 |
 | 7.1 性能回帰検証 | R-1〜R-6 全 PASS | ✅ 完了 |
 | 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | 未着手 |
-| 8. FileSource | FR-01 | 未着手 |
+| 8. FileSource | FR-01 | ✅ 完了 |
 | 9. UdpSource | FR-01 | 未着手 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
 | 11. クロスプラットフォーム | NFR-06 | 未着手 |
