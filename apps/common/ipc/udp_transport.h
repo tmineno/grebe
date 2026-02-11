@@ -35,7 +35,14 @@ private:
 #endif
     struct sockaddr_in dest_addr_{};
     uint64_t send_count_ = 0;
+    size_t max_datagram_size_ = 1400;
     std::vector<uint8_t> send_buf_;
+
+public:
+    /// Override the maximum datagram size (default: 1400 for WSL2 safety).
+    /// Set to 65000 on Windows native or real Linux for larger payloads.
+    void set_max_datagram_size(size_t size) { max_datagram_size_ = size; }
+    size_t max_datagram_size() const { return max_datagram_size_; }
 };
 
 /// UDP transport consumer (used by grebe-viewer).

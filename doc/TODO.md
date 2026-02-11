@@ -239,6 +239,31 @@ grebe-sg が既存の波形生成・ファイル再生機能をそのまま UDP 
 
 ---
 
+## Phase 9.1: UDP モード ボトルネック調査 ✅
+
+UDP トランスポートのスループット上限を定量測定し、ボトルネックを特定する。
+
+- [x] grebe-bench に BM-H (UDP ループバックスループット) 実装
+- [x] T-1: フレームレート上限測定 (1ch/2ch/4ch、block_size 変動)
+- [x] T-3: フレームサイズ vs スループット特性
+- [x] T-1b: 目標レート制限テスト (1M / 10M / 100M / 1G SPS)
+- [x] T-5: WSL2 vs Windows native UDP 性能差
+- [x] T-5c: Windows MTU 制限解除テスト (65000 byte datagram) — **1 GSPS via UDP 達成**
+- [x] T-5d: 4ch マルチチャネル UDP ベンチマーク (Windows native, datagram 1400–65000B)
+- [ ] T-2: pipe vs UDP E2E 比較 (viewer FPS)
+- [ ] T-4: E2E レイテンシ (UDP モード、各レート)
+
+**測定結果:**
+- WSL2 (1400B): ~155K fps / 104 MSPS (1ch max), 0% drops @ 100 MSPS
+- Windows native (1400B): ~220K fps / 147 MSPS, 0% drops @ 全レート
+- Windows native (65000B): ~104K fps / **3,371 MSPS**, 1 GSPS ターゲット **0% drops で達成**
+- Windows native 4ch (65000B): 105K fps / **850 MSPS/ch** (total 3,401 MSPS), 4ch×100 MSPS 0% drops ✅
+- 10 MSPS: 0% drops ✅ (Phase 9 受入条件 PASS、全環境)
+- ボトルネック: syscall overhead (~4.5 μs/frame)、総スループットはチャネル数非依存 (~3,400 MSPS)
+- 詳細: `doc/TI-phase9.1.md`
+
+---
+
 ## Phase 10: grebe-bench ベンチマークスイート (NFR-01, NFR-02)
 
 NFR 検証用の独立ベンチマークツール。
@@ -284,5 +309,6 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | ✅ 完了 |
 | 8. FileSource | FR-01 | ✅ 完了 |
 | 9. UDP トランスポート | FR-01 | ✅ 完了 |
+| 9.1 UDP ボトルネック調査 | BM-H ベンチマーク | ✅ 完了 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
 | 11. クロスプラットフォーム | NFR-06 | 未着手 |

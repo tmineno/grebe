@@ -341,14 +341,34 @@ if(WIN32)
 endif()
 
 # =============================================================================
-# grebe-bench — Benchmark suite (stub)
+# grebe-bench — Benchmark suite
 # =============================================================================
 
 add_executable(grebe-bench
     apps/bench/main.cpp
+    apps/bench/bench_udp.cpp
+    apps/common/ipc/udp_transport.cpp
 )
 
-target_link_libraries(grebe-bench PRIVATE grebe)
+target_include_directories(grebe-bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/apps/bench
+    ${CMAKE_SOURCE_DIR}/apps/common
+)
+
+target_link_libraries(grebe-bench PRIVATE
+    grebe
+    nlohmann_json::nlohmann_json
+)
+
+if(MSVC)
+    target_compile_options(grebe-bench PRIVATE /W4)
+else()
+    target_compile_options(grebe-bench PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(WIN32)
+    target_link_libraries(grebe-bench PRIVATE ws2_32)
+endif()
 
 # =============================================================================
 # Convenience targets (Linux)

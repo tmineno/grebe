@@ -85,8 +85,9 @@ bool UdpProducer::send_frame(const FrameHeaderV2& header, const void* payload) {
 #endif
 
     size_t total = sizeof(header) + header.payload_bytes;
-    if (total > 1400) {
-        spdlog::warn("UdpProducer: datagram too large ({} bytes, max 1400), dropping", total);
+    if (total > max_datagram_size_) {
+        spdlog::warn("UdpProducer: datagram too large ({} bytes, max {}), dropping",
+                     total, max_datagram_size_);
         return false;
     }
 

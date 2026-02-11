@@ -40,6 +40,7 @@ struct SgOptions {
     std::string transport  = "pipe";     // --transport=pipe|udp
     std::string udp_host   = "127.0.0.1";
     uint16_t    udp_port   = 5000;
+    size_t      datagram_size = 1400;    // max UDP datagram bytes
 };
 
 static void print_sg_help() {
@@ -61,6 +62,7 @@ static void print_sg_help() {
         "  --channels=N       Number of channels, 1-8 (default: 1)\n"
         "  --ring-size=SIZE   Ring buffer size with K/M/G suffix (default: 64M)\n"
         "  --block-size=N     Samples per channel per frame (default: 16384)\n"
+        "  --datagram-size=N  Max UDP datagram bytes (default: 1400, max: 65000)\n"
         "  --help             Show this help and exit\n"
     );
 }
@@ -100,6 +102,10 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
                 spdlog::error("--transport must be 'pipe' or 'udp'");
                 return 1;
             }
+        } else if (arg.rfind("--datagram-size=", 0) == 0) {
+            opts.datagram_size = std::stoull(arg.substr(16));
+            if (opts.datagram_size > 65000) opts.datagram_size = 65000;
+            if (opts.datagram_size < 128) opts.datagram_size = 128;
         } else if (arg.rfind("--udp-target=", 0) == 0) {
             std::string val = arg.substr(13);
             auto colon = val.rfind(':');
@@ -335,19 +341,21 @@ int main(int argc, char* argv[]) {
     // Transport producer
     std::unique_ptr<ITransportProducer> transport;
     if (opts.transport == "udp") {
-        // UDP block size cap: each datagram must fit within network MTU.
-        // Use 1400 bytes max (safe for all environments including WSL2 loopback
-        // where 127.0.0.1 silently drops UDP > 1472 bytes).
-        constexpr size_t UDP_MAX_DATAGRAM = 1400;
+        // UDP block size cap: each datagram must fit within the configured limit.
+        // Default 1400 bytes (safe for WSL2 loopback where >1472 is dropped).
+        // Use --datagram-size=65000 on Windows native for higher throughput.
         uint32_t max_block = static_cast<uint32_t>(
-            (UDP_MAX_DATAGRAM - sizeof(FrameHeaderV2)) / (opts.num_channels * sizeof(int16_t)));
+            (opts.datagram_size - sizeof(FrameHeaderV2)) / (opts.num_channels * sizeof(int16_t)));
         if (opts.block_size > max_block) {
-            spdlog::info("UDP block_size {} -> {} (MTU safe, {}ch)",
-                         opts.block_size, max_block, opts.num_channels);
+            spdlog::info("UDP block_size {} -> {} (datagram_size={}, {}ch)",
+                         opts.block_size, max_block, opts.datagram_size, opts.num_channels);
             opts.block_size = max_block;
         }
-        transport = std::make_unique<UdpProducer>(opts.udp_host, opts.udp_port);
-        spdlog::info("Transport: UDP -> {}:{}", opts.udp_host, opts.udp_port);
+        auto udp = std::make_unique<UdpProducer>(opts.udp_host, opts.udp_port);
+        udp->set_max_datagram_size(opts.datagram_size);
+        transport = std::move(udp);
+        spdlog::info("Transport: UDP -> {}:{} (datagram_size={})",
+                     opts.udp_host, opts.udp_port, opts.datagram_size);
     } else {
         transport = std::make_unique<PipeProducer>();
         spdlog::info("Transport: pipe (stdout/stdin)");
