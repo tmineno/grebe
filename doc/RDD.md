@@ -1,644 +1,294 @@
-# Grebe — 高速リアルタイム波形描画ライブラリ 要件定義書
+# Grebe — Stage/Interface 実行フレームワーク 要件定義書
 
-**バージョン:** 2.1.0
+**バージョン:** 3.0.0  
 **最終更新:** 2026-02-11
 
-> **PoC (v0.1.0) からの移行**: 本ドキュメントは PoC フェーズ (Phase 0–13.5) の成果を踏まえ、プロジェクト目的を「任意のインタフェイスを用いた実デバイス入力をサポートする高速リアルタイム波形描画ライブラリ」に再定義したものである。PoC の技術検証結果は [TR-001](TR-001.md) を参照。
->
-> **v2.1.0 更新**: Phase 1–7.2 のリファクタリング完了を反映。libgrebe を純粋データパイプラインに純化（Vulkan、ImGui、IPC、ベンチマーク等をアプリケーション側に分離）。アーキテクチャ図、API 定義、成果物一覧、移行マッピングを現在の実装に同期。
+> 本書は、grebe を「高速波形描画アプリ」ではなく、
+> **高効率な Stage と Interface を接続・実行する E2E フレームワーク**として再定義する。
+> 実装手順・OS 固有最適化・統合例は `doc/INTEGRATION.md` を参照。
 
 ---
 
-## 1. 目的と背景
+## 1. 目的
 
-### 1.1 目的
+高速時系列データ処理を以下の形で統一的に扱える基盤を定義する。
 
-任意のデータ取得インタフェイス（NIC、USB3、PCIe 等）から入力される高速時系列データを、リアルタイムに波形描画するための C++ フレームワーク **libgrebe** と、その参照実装アプリケーション **grebe-viewer** を開発する。
+- Stage（処理単位）をカスケード接続してデータフローを構築
+- Interface（接続契約）を共通化して実装差異を局所化
+- Runtime が実行効率（スループット、レイテンシ、ドロップ率）を保証
 
-### 1.2 背景
+### 1.1 スコープ
 
-PoC (v0.1.0, TR-001) において以下が定量的に検証された：
+対象:
 
-| 検証項目 | 結果 | 参照 |
-|----------|------|------|
-| 1 GSPS 16-bit データの 60 FPS 描画 | 達成 (59.7 FPS) | TR-001 §概要 |
-| CPU MinMax SIMD デシメーション | 19,834 MSPS | TR-001 §2.1 |
-| CPU デシメーション > GPU コンピュート | 3.9–7.1× 高速 | TR-001 §3.1 |
-| E2E レイテンシ p99 | 18.1 ms (目標 ≤50 ms) | TR-001 §5 |
-| 波形忠実度（エンベロープ一致） | 100% (Embedded) | TR-001 §4 |
-| マルチチャネル 4ch × 1 GSPS ゼロドロップ | 達成 | TR-001 §2.4 |
+- E2E システム: `libgrebe` + `grebe-viewer` + `grebe-sg`
+- Stage 契約、Frame 契約、実行 Runtime 契約
+- モード別 NFR（Embedded / Pipe / UDP）
 
-これらの実績を基盤に、合成データ生成器に依存しない汎用ライブラリへ再構築する。
+非対象:
 
-### 1.3 PoC からの主要な設計変更
-
-| 項目 | PoC (v0.1.0) | ライブラリ (v2.0) |
-|------|-------------|-------------------|
-| データ入力 | grebe-sg サブプロセス（合成波形） | IDataSource 抽象インタフェイス |
-| 描画 | Vulkan + GLFW 直接結合 | IRenderBackend 抽象（ヘッダのみ）+ アプリ側 Vulkan 実装 |
-| 構成管理 | CLI 引数 + グローバル状態 | PipelineConfig 構造体ベース |
-| メトリクス | ImGui HUD 埋め込み | TelemetrySnapshot 構造体、計測・UI はアプリ側 |
-| プロセスモデル | 2 プロセス必須 | シングルプロセス (Embedded) / IPC (grebe-sg) 両対応 |
-| ライブラリ依存 | Vulkan, GLFW, ImGui, VMA 等多数 | spdlog のみ |
+- DPDK/AF_XDP/VFIO/IOCP 等の実装詳細（`doc/INTEGRATION.md` へ分離）
 
 ---
 
-## 2. 前提条件
+## 2. システム定義
 
-### 2.1 対象データ仕様
+### 2.1 成果物
 
-| 項目 | 仕様 |
-|------|------|
-| サンプル幅 | 16-bit 符号付き整数 (int16_t) |
-| チャネル数 | 1–8 ch |
-| 最大サンプルレート | 1 GSPS / ch |
-| 最大合計スループット | 8 GSPS (8ch × 1 GSPS) = 16 GB/s |
+| 成果物 | 役割 |
+|---|---|
+| `libgrebe` | Stage 実行 Runtime + コア処理 Stage 群 |
+| `grebe-viewer` | 可視化 Stage 群 + UI/HUD + 計測 |
+| `grebe-sg` | 生成/再生 Source Stage + 送信 Stage |
 
-### 2.2 入力インタフェイスと OS 転送メカニズム
+### 2.2 動作モード
 
-ライブラリは以下のインタフェイスからのデータ入力を抽象化する。具体的なドライバ実装はライブラリのスコープ外とし、IDataSource インタフェイスを通じて結合する。
-
-| インタフェイス | 想定用途 | 帯域目安 |
-|---------------|----------|----------|
-| PCIe (DMA) | FPGA 直結 ADC | 数 GB/s–数十 GB/s |
-| USB 3.x | 汎用計測器 | 最大 5 Gbps (USB3.0) |
-| NIC (Ethernet) | ネットワーク接続型計測器 | 1–100 GbE |
-| ファイル再生 | キャプチャ済みデータの解析 | ストレージ速度依存 |
-| 合成信号 | テスト・デモ用 | CPU 速度依存 |
-
-#### OS レベルの転送メカニズム
-
-高帯域データ転送に利用可能な OS メカニズムは、デバイス種別ごとに異なる。統一的な「OS 標準の広帯域転送 API」は存在せず、バッファ所有権モデル・通知モデル・フレーミングの 3 軸がそれぞれ異なるため、トランスポートレベルでの統一は不可能である。これが IDataSource による**フレーム配信レベルでの抽象化**を採用する根拠となる。
-
-| メカニズム | OS | 対象デバイス | ゼロコピー | カーネルバイパス |
-|-----------|-----|-------------|-----------|----------------|
-| VFIO / UIO | Linux | PCIe デバイス全般 (FPGA, NIC, GPU) | ○ (DMA) | 完全 |
-| AF_XDP | Linux 4.18+ | NIC (PCIe 接続) | ○ | 部分的 |
-| DPDK | Linux | NIC (PCIe 接続) | ○ | 完全 |
-| libusb (async bulk) | Linux/Windows/macOS | USB デバイス | △ | × |
-| io_uring | Linux 5.1+ | ファイル / NIC / 汎用 | ○ (6.15+) | 部分的 |
-| mmap | 全 OS | ファイル | ○ | N/A |
-| IOCP + Registered I/O | Windows | ファイル / NIC / 汎用 | △ | × |
-
-**デバイス種別と推奨メカニズムの対応:**
-
-| デバイス種別 | バス | 推奨メカニズム | 備考 |
-|-------------|------|---------------|------|
-| FPGA / ADC カード | PCIe 直結 | VFIO + ベンダ DMA ドライバ (Xilinx XDMA, Intel OPAE 等) | ユーザ空間から DMA バッファに直接アクセス |
-| NIC (高帯域) | PCIe 直結 | AF_XDP or DPDK (内部で vfio-pci) | Ethernet プロトコル処理込み |
-| USB 計測器 | USB バス | libusb async bulk | USB プロトコルスタックが必須のため VFIO 不可 |
-| ファイル再生 | ストレージ | mmap + madvise(SEQUENTIAL) or io_uring | NVMe SSD で 5–7 GB/s |
-
-> **注記**: NIC は PCIe デバイスであるため VFIO で直接バインド可能だが、Ethernet/IP/UDP のプロトコル解析が必要なため、実用上は DPDK や AF_XDP といったプロトコル処理込みのフレームワークを介する。USB デバイスは PCIe バス上の USB ホストコントローラの配下にあり、USB プロトコルスタック（エニュメレーション、エンドポイント管理）が不可欠なため、VFIO による直接アクセスは不可能である。
-
-#### 統一できない 3 軸
-
-| 軸 | DPDK (NIC) | libusb (USB) | VFIO (PCIe DMA) | mmap (File) |
-|----|-----------|-------------|-----------------|-------------|
-| バッファ所有権 | mempool (ライブラリ管理) | ユーザ確保 | ユーザ確保 + IOMMU | カーネルページキャッシュ |
-| 通知モデル | polling (busy-wait) | callback / blocking | eventfd / polling | 同期 / ページフォルト |
-| フレーム単位 | Ethernet frame | USB bulk transfer | デバイス定義 | 生バイト列 |
-
-### 2.3 動作環境
-
-| 項目 | 要件 |
-|------|------|
-| OS | Linux (x86_64), Windows 10/11 (x86_64) |
-| GPU API | Vulkan 1.0 以上 |
-| コンパイラ | GCC 12+ / MSVC 19.30+ (C++20) |
-| ビルドシステム | CMake 3.24+ |
-| CPU 命令セット | SSE2 必須、AVX2 推奨 |
+| モード | 経路 | 主用途 |
+|---|---|---|
+| Embedded | Source(Stage, in-process) -> Runtime -> Visualization(Stage) | 上限性能・デバッグ |
+| Pipe | grebe-sg -> pipe -> grebe-viewer | ローカル標準運用 |
+| UDP | grebe-sg -> UDP -> grebe-viewer | 独立プロセス / ネットワーク運用 |
 
 ---
 
-## 3. アーキテクチャ概要
+## 3. アーキテクチャ原則
 
-### 3.1 コンポーネント構成
+1. **Stage First**
+   - Source/Processing/Visualization を同じ Stage 抽象で扱う。
+2. **Interface First**
+   - Stage 間接続は共通 Frame 契約で統一し、実装依存を境界で止める。
+3. **Runtime-Owned Efficiency**
+   - 最適化（バッチ、キュー、スレッド配置、バックプレッシャー）は Runtime の責務とする。
+4. **Data Plane / Control Plane 分離**
+   - データ転送と設定変更・監視を分離し、性能劣化と複雑性を抑える。
+5. **Mode-Invariant Contracts**
+   - Embedded/Pipe/UDP で Stage 契約は不変。差分は Transport Stage 内に閉じ込める。
 
-システムは 3 つの独立した成果物で構成される：**libgrebe**（コアデータパイプライン）、**grebe-viewer**（波形描画アプリケーション）、**grebe-sg**（信号発生器プロセス）。
+---
 
-```
-┌───────────────────────────────────────┐     ┌──────────────────────────────┐
-│ grebe-sg (Signal Generator)           │     │ grebe-viewer (Waveform Viewer)│
-│                                       │     │                              │
-│  ┌─────────────┐ ┌──────────────┐    │     │  ┌──────────────────────┐    │
-│  │DataGenerator │ │ FileReader   │    │     │  │ TransportSource      │    │
-│  │(Synthetic)   │ │ (GRB File)   │    │     │  │ (IDataSource impl)   │    │
-│  └──────┬───────┘ └──────┬───────┘    │     │  └──────────┬───────────┘    │
-│         │                │            │     │             │                │
-│         ▼                ▼            │     │  ┌──────────▼───────────┐    │
-│  ┌──────────────────────────┐        │     │  │ IngestionThread      │    │
-│  │ N × RingBuffer           │        │     │  │ (DataSource→Ring)    │    │
-│  └──────────┬───────────────┘        │     │  └──────────┬───────────┘    │
-│             │                         │     │             │                │
-│  ┌──────────▼───────────────┐        │     │  ┌──────────▼───────────┐    │
-│  │ sender_thread            │        │     │  │ N × RingBuffer       │    │
-│  │ (drain → frame → send)  │        │     │  └──────────┬───────────┘    │
-│  └──────────┬───────────────┘        │     │             │                │
-│             │                         │     │  ┌──────────▼───────────┐    │
-│  ┌──────────▼───────────────┐        │     │  │ DecimationEngine     │    │
-│  │ ITransportProducer       │        │     │  └──────────┬───────────┘    │
-│  │  ├─ PipeProducer (stdout)│        │     │             │                │
-│  │  └─ UdpProducer (socket) │        │     │  ┌──────────▼───────────┐    │
-│  └──────────┬───────────────┘        │     │  │ VulkanRenderer       │    │
-│             │                         │     │  │ (IRenderBackend)     │    │
-│  ┌──────────▼──────┐                 │     │  └──────────┬───────────┘    │
-│  │ GUI (OpenGL     │                 │     │             │                │
-│  │  + ImGui)       │                 │     │  ┌──────────▼───────────┐    │
-│  └─────────────────┘                 │     │  │ HUD (ImGui overlay)  │    │
-│                                       │     │  │ Benchmark, Profiler  │    │
-│  Responsibility:                      │     │  └──────────────────────┘    │
-│  - Signal generation (synthetic)      │     │                              │
-│  - File playback (GRB format)         │     │  ┌──────────────────────┐    │
-│  - Transport framing (FrameHeaderV2)  │     │  │ ITransportConsumer   │    │
-│  - GUI for source/rate/waveform ctrl  │     │  │  ├─ PipeConsumer     │    │
-│                                       │     │  │  └─ UdpConsumer      │    │
-└────────────────┬──────────────────────┘     │  └──────────────────────┘    │
-                 │                             │                              │
-                 │  Transport (選択可能)        │  Responsibility:             │
-                 │  ┌────────────────────┐     │  - Vulkan wave rendering     │
-                 ├──┤ Pipe (stdout/stdin)├──▶──│  - Data pipeline (libgrebe)  │
-                 │  └────────────────────┘     │  - Telemetry/profiling       │
-                 │  ┌────────────────────┐     │  - HUD (ImGui overlay)       │
-                 └──┤ UDP (socket)       ├──▶──│  - Process management        │
-                    └────────────────────┘     │    (pipe mode: spawn sg)     │
-                                               └──────────────────────────────┘
-
-                 ┌───────────────────────────────────────────────────────┐
-                 │ libgrebe (Core Library — Pure Data Pipeline)          │
-                 │                                                       │
-                 │  Interfaces (header-only):                            │
-                 │    IDataSource, IRenderBackend                        │
-                 │    PipelineConfig, TelemetrySnapshot, DrawCommand     │
-                 │                                                       │
-                 │  Pipeline components:                                  │
-                 │    SyntheticSource, IngestionThread,                   │
-                 │    RingBuffer (SPSC), DecimationEngine                │
-                 │    (MinMax SSE2 SIMD + LTTB)                          │
-                 │                                                       │
-                 │  Dependency: spdlog only                              │
-                 └───────────────────────────────────────────────────────┘
-```
-
-#### 動作モード
-
-| モード | grebe-viewer CLI | grebe-sg | トランスポート | 備考 |
-|--------|-----------------|----------|---------------|------|
-| Pipe (デフォルト) | `grebe-viewer` | 自動起動 (subprocess) | stdout/stdin パイプ | grebe-viewer が grebe-sg を自動 spawn |
-| UDP | `grebe-viewer --udp=5000` | 手動起動 `grebe-sg --transport=udp` | UDP ソケット | 独立プロセス、ネットワーク越しも可能 |
-| Embedded | `grebe-viewer --embedded` | 不使用 | なし | SyntheticSource 内蔵、テスト/デモ用 |
-
-**libgrebe の責務は純粋なデータパイプライン（取り込み → リングバッファ → デシメーション → 出力）のみ。** 描画 (VulkanRenderer)、UI (HUD/ImGui)、テレメトリ計測 (Benchmark)、トランスポート (PipeTransport, UdpTransport) はすべてアプリケーション側に配置される。ライブラリは抽象インタフェイス定義（`IDataSource`, `IRenderBackend`）とデータ型定義（`TelemetrySnapshot`, `PipelineConfig`, `DrawCommand` 等）をヘッダとして提供する。
-
-### 3.2 主要抽象インタフェイス
-
-#### IDataSource
-
-アプリケーションが実装し、libgrebe に注入するデータ供給インタフェイス。各デバイス固有の転送メカニズム（§2.2 参照）の差異を吸収し、libgrebe に対して統一的なフレームストリームを提供する。
+## 4. 論理アーキテクチャ
 
 ```
-デバイス固有の世界                    libgrebe の世界
-┌─────────────────┐
-│ DPDK            │ rx_burst → パケット解析
-│ (NIC, polling)  │ → UDP デフレーム
-│                 ├──────▶ FrameHeader + int16_t[]
-├─────────────────┤            │
-│ libusb          │        IDataSource
-│ (USB, callback) ├──────▶ .read_frame()
-├─────────────────┤            │
-│ VFIO + XDMA     │            ▼
-│ (PCIe DMA)      ├──────▶ RingBuffer → DecimationEngine
-├─────────────────┤
-│ mmap            │
-│ (File)          ├──────▶
-└─────────────────┘
+SourceStage -> Stage -> Stage -> ... -> VisualizationStage
+      |            Runtime (queues, pool, scheduler)            |
+      +--------------------- Control Plane ----------------------+
 ```
+
+### 4.1 Stage 分類（論理）
+
+| 分類 | 例 | 入力 | 出力 |
+|---|---|---|---|
+| SourceStage | Synthetic, File, Device, TransportRx | なし | Frame |
+| TransformStage | 校正、再整列、レート変換 | Frame | Frame |
+| ProcessingStage | Decimation, Feature extraction | Frame | Frame |
+| PostStage | 可視化向け整形、レイアウト計算 | Frame | Frame |
+| VisualizationStage | Render backend bridge | Frame | Draw commands / pixels |
+| SinkStage | Recorder, Export, Metrics sink | Frame | なし |
+
+### 4.2 Runtime 責務
+
+- Stage グラフ（線形/DAG）の構築と実行
+- Queue/Buffer Pool のライフサイクル管理
+- Backpressure policy の適用
+- スレッド/CPU アフィニティ管理
+- テレメトリ収集（Stage 単位 + E2E）
+
+---
+
+## 5. 契約（Contract）
+
+### 5.1 Frame 契約
+
+Frame は以下を満たすこと。
+
+- channel-major (`[ch0][ch1]...`) の `int16_t` データ
+- 単調増加 `sequence`
+- `producer_ts` を含む時刻情報
+- 所有権モデル（owned/borrowed）を明示
+
+参考メタデータ:
+
+| 項目 | 意味 |
+|---|---|
+| `sequence` | 欠落検出・順序保証 |
+| `channel_count` | チャネル数 |
+| `samples_per_channel` | チャネルあたりサンプル数 |
+| `sample_rate_hz` | レート |
+| `flags` | borrowed/owned, discontinuity 等 |
+
+### 5.2 Stage 契約
+
+Stage は以下の共通契約を満たす。
+
+- 入力 Batch を受け取り、出力 Batch を返す
+- EOS / Retry / Error を明示的に返す
+- stop 要求に対して bounded time で停止する
+
+疑似シグネチャ:
 
 ```cpp
-class IDataSource {
+class IStage {
 public:
-    virtual ~IDataSource() = default;
-
-    // データソースの情報を返す
-    virtual DataSourceInfo info() const = 0;
-
-    // データフレームを読み出す (ブロッキング or ノンブロッキング)
-    virtual ReadResult read_frame(FrameBuffer& out) = 0;
-
-    // データソースの開始/停止
-    virtual void start() = 0;
-    virtual void stop() = 0;
+    virtual ~IStage() = default;
+    virtual StageResult process(const BatchView& in, BatchWriter& out, ExecContext& ctx) = 0;
 };
 ```
 
-**実装済みの IDataSource:**
-- **SyntheticSource** (`src/synthetic_source.h`): libgrebe 同梱、合成波形生成
-- **TransportSource** (`apps/viewer/transport_source.h`): grebe-viewer 同梱、任意の ITransportConsumer (Pipe/UDP) からの受信
+### 5.3 Queue 契約
 
-**設計判断: コピーベースを v1.0 のデフォルトとする根拠**
+- 有界キュー（capacity 明示）
+- 輻輳時の動作を policy 化
+- policy は最低限 `drop_latest`, `drop_oldest`, `block` をサポート
 
-PCIe DMA や AF_XDP のゼロコピーパスに対応するにはバッファ借用セマンティクス（`borrow_frame()` / `release_frame()`）が必要だが、v1.0 ではコピーベースの `read_frame()` のみとする。TR-001 §3.2 の知見により、パフォーマンスのボトルネックは memcpy のコスト自体ではなくキャッシュコールドデータアクセスであり、マルチスレッドデシメーションによる局所性改善の方が支配的に効くことが判明しているためである。
+### 5.4 Telemetry 契約
 
-| フェーズ | IDataSource API | 対応デバイス |
-|---------|-----------------|-------------|
-| v1.0 | `read_frame()` — コピーベース | 合成信号, ファイル, USB (libusb) |
-| v1.1 (将来) | `borrow_frame()` / `release_frame()` 追加 | PCIe DMA (VFIO), AF_XDP |
-| v2.0 (将来) | リングバッファ共有登録 | デバイスが libgrebe のリングに直接 DMA |
+最低限、以下を Stage ごとと E2E で観測可能にする。
 
-#### IRenderBackend
-
-描画バックエンドの抽象インタフェイス。libgrebe はヘッダのみ（`include/grebe/render_backend.h`）を提供し、具体実装はアプリケーション側に配置する。grebe-viewer が VulkanRenderer 実装を同梱する。
-
-```cpp
-class IRenderBackend {
-public:
-    virtual ~IRenderBackend() = default;
-
-    // 頂点データの GPU アップロード
-    virtual void upload_vertices(const int16_t* data, size_t count) = 0;
-
-    // 完了した転送を描画スロットに昇格
-    virtual bool swap_buffers() = 0;
-
-    // マルチチャネル波形フレームの描画 (DrawRegion で描画領域を指定)
-    virtual bool draw_frame(const DrawCommand* channels, uint32_t num_channels,
-                            const DrawRegion* region) = 0;
-
-    // ウィンドウリサイズ対応
-    virtual void on_resize(uint32_t width, uint32_t height) = 0;
-
-    // V-Sync 制御
-    virtual void set_vsync(bool enabled) = 0;
-    virtual bool vsync() const = 0;
-
-    // 描画バッファ内の現在の頂点数
-    virtual uint32_t vertex_count() const = 0;
-};
-```
-
-**実装済み:** VulkanRenderer (`apps/viewer/vulkan_renderer.h`) — Vulkan ベースの高速描画、トリプルバッファリング、overlay callback 対応
-
-### 3.3 フレームプロトコル
-
-PoC で実装・検証済みの FrameHeaderV2。IPC パイプおよび UDP トランスポートで共通使用される。FrameHeaderV2 は libgrebe 外（`apps/common/ipc/contracts.h`）に配置され、grebe-viewer と grebe-sg の間で共有される。
-
-```cpp
-struct FrameHeaderV2 {
-    uint32_t magic;                // 'GFH2' (0x32484647 LE)
-    uint32_t header_bytes;         // sizeof(FrameHeaderV2)（前方互換用）
-    uint64_t sequence;             // 単調増加、ドロップ検出用
-    uint64_t producer_ts_ns;       // E2E レイテンシ計測用タイムスタンプ
-    uint32_t channel_count;        // 1–8
-    uint32_t block_length_samples; // チャネルあたりのサンプル数
-    uint32_t payload_bytes;        // channel_count × block_length_samples × 2
-    uint32_t header_crc32c;        // ヘッダ整合性検証 (プレースホルダ)
-    double   sample_rate_hz;       // サンプルレート（動的変更対応）
-    uint64_t sg_drops_total;       // ソース (grebe-sg) 側ドロップ累計
-    uint64_t first_sample_index;   // 絶対サンプル位置
-};
-```
-
-libgrebe 内部で使用するフレーム形式は `grebe::FrameBuffer`（`include/grebe/data_source.h`）であり、フレームヘッダからの変換は TransportSource（アプリケーション側）が行う。
-
-### 3.4 検証済み設計制約 (TR-001 由来)
-
-以下は PoC で定量的に検証済みであり、本ライブラリでも維持する設計制約である。
-
-| 制約 | 根拠 | TR-001 参照 |
-|------|------|------------|
-| デシメーションは GPU ではなく CPU 側で実行する | CPU SIMD 19,834 MSPS vs GPU Compute 5,127 MSPS (3.9×) | §3.1 |
-| デシメーション後の GPU 転送量は ≤ 7.68 KB/frame | 1920×2 = 3,840 頂点 × 2 bytes; 入力レート非依存 | §1.2 |
-| マルチチャネルデシメーションはチャネル単位で並列化する | キャッシュ局所性: 4ch×1G 逐次 = 18.19ms, 並列 = 0.22ms (80×) | §3.2 |
-| MSVC ビルドでは明示的 SIMD intrinsics が必須 | GCC 1.1× vs MSVC 10.5× (auto-vectorization 差) | §2.1 |
-| ロックフリー SPSC リングバッファでスレッド間結合 | atomic のみ、mutex なし、<0.3% 充填率 @ 1 GSPS | §2.3 |
-| GPU アップロードはトリプルバッファリングで重畳 | 書込/転送/描画を独立スロットで並行 | §2.5 |
-
-### 3.5 GRB ファイルフォーマット
-
-バイナリファイル再生用のファイルフォーマット。grebe-sg がファイルを読み取り、IPC パイプ経由で grebe-viewer にストリーミングする。
-
-```c++
-struct GrbFileHeader {        // 32 bytes, little-endian
-    uint32_t magic;           // 'GRB1' = 0x31425247
-    uint32_t version;         // 1
-    uint32_t channel_count;   // 1–8
-    uint32_t reserved;        // 0（パディング）
-    double   sample_rate_hz;  // サンプルレート (Hz)
-    uint64_t total_samples;   // チャネルあたりのサンプル数
-};
-```
-
-**ペイロード配置:** ヘッダ直後にチャネルメジャー順で `int16_t` サンプルが連続する。
-
-```
-[GrbFileHeader (32B)]
-[ch0_sample_0 .. ch0_sample_{N-1}]    // N = total_samples
-[ch1_sample_0 .. ch1_sample_{N-1}]
-...
-[ch{M-1}_sample_0 .. ch{M-1}_sample_{N-1}]  // M = channel_count
-```
-
-- **ファイルサイズ:** `32 + channel_count × total_samples × 2` bytes
-- **バイトオーダー:** リトルエンディアン（x86/ARM ネイティブ）
-- **制約:** channel_count 1–8, total_samples ≥ 1
-- **生成ツール:** `scripts/generate_grb.py`
+- throughput (frames/s, samples/s)
+- latency (avg/p95/p99)
+- drops (source/view/runtime)
+- queue fill ratio
+- processing time (stage breakdown)
 
 ---
 
-## 4. 機能要件
+## 6. 機能要件
 
-### FR-01: DataSource 抽象インタフェイス
+### FR-01: Stage 抽象
 
-- IDataSource を実装することで任意のデータ取得インタフェイスを接続できること
-- ライブラリは以下の参照実装を同梱する：
-  - **SyntheticSource** (実装済み): 合成信号生成（正弦波、矩形波、鋸歯状波、ホワイトノイズ、チャープ）
-- アプリケーション同梱の IDataSource 実装：
-  - **TransportSource** (実装済み): 任意の ITransportConsumer 経由の受信（grebe-viewer 同梱、`apps/viewer/`）
-    - PipeConsumer: grebe-sg サブプロセスからの IPC パイプ受信
-    - UdpConsumer: 外部 grebe-sg からの UDP ソケット受信
-- grebe-sg 同梱のデータソース：
-  - **FileReader** (実装済み): GRB バイナリファイルの再生（mmap + ペーシング）
-- 外部実装（高帯域 NIC (DPDK/AF_XDP)、USB3、PCIe）はアプリケーション側で IDataSource を実装して注入する
+- 全処理単位を `IStage` 互換で実装可能であること。
+- Source/Sink/Visualization も同一抽象体系で扱えること。
 
-### FR-02: デシメーションエンジン
+### FR-02: Graph 構成
 
-- MinMax (SSE2 SIMD) および LTTB アルゴリズムをサポートすること
-- サンプルレート ≥ 100 MSPS で LTTB を自動的に MinMax に切り替えること（PoC 実績: LTTB 734 MSPS < 1 GSPS）
-- デシメーション出力は画面解像度に応じた頂点数 (width × 2) であること
-- アルゴリズムの追加が可能な拡張ポイントを設けること
+- Stage を線形または DAG として接続できること。
+- 実行順序、fan-in/fan-out、バッチ境界を宣言可能であること。
 
-### FR-03: マルチチャネルサポート
+### FR-03: Runtime 実行
 
-- 1–8 チャネルの同時描画をサポートすること
-- チャネルごとに独立したリングバッファとデシメーションワーカーを割り当てること
-- チャネルの配色、表示レイアウト（垂直分割）はコンフィグで指定可能であること
+- Runtime が Stage グラフの実行・同期・停止を管理すること。
+- Stage 単位で worker 数と実行ポリシーを設定可能であること。
 
-### FR-04: レンダリングバックエンド
+### FR-04: Data Source 統合
 
-- IRenderBackend を実装することで描画先を差し替え可能であること
-- libgrebe はインタフェイス定義（`include/grebe/render_backend.h`）のみを提供し、具体実装はアプリケーション側に配置する
-- grebe-viewer は以下の実装を同梱する：
-  - **VulkanRenderer** (実装済み): Vulkan ベースの高速描画（PoC で検証済み、`apps/viewer/`）
-  - overlay callback (`std::function<void(VkCommandBuffer)>`) による描画拡張ポイント（HUD 等）
-- プッシュ定数による per-channel 描画パラメータ（振幅スケール、オフセット、色、DrawRegion）を維持すること
+- `IDataSource` 準拠実装を SourceStage として注入可能であること。
+- 既存 `SyntheticSource` と `TransportSource` を継続利用できること。
 
-### FR-05: テレメトリ / メトリクス API
+### FR-05: Processing 拡張
 
-- 以下のメトリクスをフレーム単位で取得可能な構造体 (`TelemetrySnapshot`) として公開すること：
-  - FPS、フレーム時間（ローリング平均）
-  - E2E レイテンシ
-  - リングバッファ充填率
-  - パイプライン各相タイミング（drain, upload, swap, render, decimation）
-  - データレート、頂点数、デシメーション比
-- libgrebe は `TelemetrySnapshot` データ型定義のみ提供（`include/grebe/telemetry.h`）
-- テレメトリ計測ロジック（Benchmark クラス）、CSV/JSON シリアライズはアプリケーション側（grebe-viewer）に配置
+- Decimation は ProcessingStage として実装されること。
+- 追加処理（FFT、トリガ、フィルタ等）を Stage 追加のみで統合できること。
 
-### FR-06: 波形忠実度検証
+### FR-06: Visualization 接続
 
-- エンベロープ検証器（PoC 実装ベース）をプロファイリング機能として提供すること
-- 既知の周期信号に対し ±1 LSB の許容誤差でエンベロープ一致率を算出すること
-- 実装は grebe-viewer のプロファイラに同梱（`apps/viewer/envelope_verifier.h`）— libgrebe のコア機能ではない
+- VisualizationStage は `IRenderBackend` 実装と接続可能であること。
+- Render backend 差し替えで上流 Stage が変更不要であること。
 
-### FR-07: コンフィギュレーション API
+### FR-07: Backpressure 制御
 
-- 全設定を構造体ベースで受け渡しすること（CLI パーサーはライブラリに含めない）
-- `PipelineConfig` (`include/grebe/config.h`) の設定項目：
-  - チャネル数 (1–8)、リングバッファサイズ
-  - デシメーション設定（`DecimationConfig`: アルゴリズム、ターゲット頂点数、可視時間幅）
-  - V-Sync モード
-- 将来の拡張項目（未実装）：
-  - バックプレッシャーポリシー（ドロップ / ブロック / コールバック通知）
+- queue ごとに policy を設定可能であること。
+- policy 適用結果が telemetry に反映されること。
+
+### FR-08: 互換トランスポート
+
+- Pipe/UDP は Transport Stage として扱い、上流/下流契約を変更しないこと。
+- 伝送ヘッダは `FrameHeaderV2` 互換を維持すること。
+
+### FR-09: コンフィギュレーション
+
+- 設定は構造体 API で受け渡すこと（CLI はアプリ層責務）。
+- Runtime/Stage/Transport の設定境界を分離すること。
 
 ---
 
-## 5. 非機能要件
+## 7. 非機能要件（モード別）
 
 ### NFR-01: 描画性能
 
-PoC 実績（TR-001 §概要）を基準とした性能目標。環境: x86_64, Vulkan 対応 GPU。
+| モード | 条件 | 目標 |
+|---|---|---|
+| Embedded | 1ch x 1 GSPS, MinMax, V-Sync ON | >= 60 FPS |
+| Embedded | 1ch x 1 GSPS, MinMax, V-Sync OFF | >= 500 FPS |
+| Pipe | 1ch x 100 MSPS | >= 60 FPS |
+| Pipe | 1ch x 1 GSPS | >= 60 FPS |
+| UDP | 1ch x 10 MSPS (loopback) | >= 60 FPS |
+| UDP | 1ch x 100 MSPS (loopback) | >= 60 FPS |
 
-| レベル | 入力条件 | 目標 FPS | PoC 実績 |
-|--------|----------|----------|----------|
-| L0 | 1 ch × 1 MSPS, MinMax | ≥ 60 FPS | 60.3 FPS |
-| L1 | 1 ch × 100 MSPS, MinMax | ≥ 60 FPS | 60.2 FPS |
-| L2 | 1 ch × 1 GSPS, MinMax | ≥ 60 FPS | 59.7 FPS |
-| L3 | 1 ch × 1 GSPS, MinMax, V-Sync OFF | ≥ 500 FPS | 2,022 FPS |
+### NFR-02: E2E レイテンシ (p99)
 
-### NFR-02: E2E レイテンシ
+| モード | 条件 | 目標 |
+|---|---|---|
+| Embedded | 1ch, 任意レート | <= 50 ms |
+| Pipe | 1ch/4ch, 任意レート | <= 100 ms |
+| UDP | 1ch, 10-100 MSPS (loopback) | <= 100 ms |
 
-データフレーム到着からピクセル表示完了までの遅延。
+### NFR-03: ゼロドロップ（定常状態）
 
-| レベル | 条件 | p99 目標 | PoC 実績 |
-|--------|------|----------|----------|
-| L1 | 1 ch, 任意レート | ≤ 50 ms | 18.1 ms |
-| L2 | 4 ch, 任意レート | ≤ 100 ms | 6.6 ms |
+| モード | 条件 | 目標 |
+|---|---|---|
+| Embedded | 1ch/4ch | 0 drops |
+| Pipe | 1ch/4ch | 0 drops |
+| UDP | 1ch x 10 MSPS | 0 drops |
+| UDP | 1ch x 100 MSPS | 0 drops（環境依存条件付き） |
 
-### NFR-03: 波形忠実度
+### NFR-04: スループット効率
 
-- デシメーションアルゴリズムの出力が、入力信号のエンベロープに対し ±1 LSB 以内であること
-- 定常状態でのエンベロープ一致率 ≥ 99%（PoC 実績: Embedded 100%, IPC 4ch×1G 99.2%）
-
-### NFR-04: ゼロドロップ（定常状態）
-
-- DataSource がデータを供給し続ける限り、ライブラリ内部でのサンプルドロップが 0 であること
-- ドロップが発生した場合はテレメトリ API を通じて検出可能であること
+- 高レート経路（>= 100 MSPS）ではフレームごとの再確保を避けること。
+- Runtime は batch 実行をサポートし、1-frame 1-syscall 依存を緩和可能であること。
 
 ### NFR-05: リソース効率
 
-- ライブラリ初期化後にヒープアロケーションを行わないこと（リングバッファ、ワーカープール等は初期化時に確保）
-- CPU 使用率: デシメーション + 描画で利用可能コア数の 50% 以下（8ch × 1 GSPS 時）
+- 固定バッファプールと有界キューを初期化時に確保すること。
+- デシメーション+描画の CPU 使用率は 8ch x 1 GSPS 条件で利用可能コアの 50% 以下を目標とする。
 
 ### NFR-06: クロスプラットフォーム
 
-- Linux (GCC) と Windows (MSVC) で同一ソースからビルド可能であること
-- 性能差は同一ハードウェアで 20% 以内であること（SIMD intrinsics の明示使用で保証）
+- Linux (GCC) / Windows (MSVC) で同一ソースをビルド可能であること。
+- Embedded/Pipe/UDP の全モードが両 OS で動作すること。
+
+### NFR-07: 観測可能性
+
+- Stage 単位と E2E の telemetry を同時収集できること。
+- 問題解析時に「どの Stage が律速か」を判別できること。
 
 ---
 
-## 6. 成果物
+## 8. 成果物
 
-### 6.1 ライブラリ
-
-| 成果物 | 状態 | 説明 |
-|--------|------|------|
-| libgrebe | 実装済み | コアデータパイプラインライブラリ（静的リンク）、spdlog のみ依存 |
-| `include/grebe/grebe.h` | 実装済み | パブリック API アンブレラヘッダ |
-| CMake パッケージ | 未実装 | `find_package(grebe)` で利用可能な CMake config |
-
-### 6.2 アプリケーション
+### 8.1 実装
 
 | 成果物 | 状態 | 説明 |
-|--------|------|------|
-| grebe-viewer | 実装済み | 参照実装ビューア（Vulkan + ImGui + IPC + プロファイラ + ベンチマーク） |
-| grebe-sg | 実装済み | 信号発生器プロセス（OpenGL + ImGui GUI、Pipe/UDP トランスポート選択、grebe-viewer から自動起動 or 独立実行） |
-| grebe-bench | スタブ | パフォーマンスベンチマークスイート（libgrebe API ベース移行予定） |
+|---|---|---|
+| `libgrebe` | 実装済み（進化中） | Stage 実行基盤の中核 |
+| `grebe-viewer` | 実装済み | Visualization 側参照実装 |
+| `grebe-sg` | 実装済み | Source/Transport 側参照実装 |
+| `grebe-bench` | 未完 | モード別 NFR 検証基盤 |
 
-### 6.3 ドキュメント
+### 8.2 ドキュメント
 
-| 成果物 | 状態 | 説明 |
-|--------|------|------|
-| doc/RDD.md | 実装済み | 本要件定義書 |
-| doc/TR-001.md | 実装済み | PoC 技術レポート（検証済みエビデンス） |
-| doc/TI-phase7.md | 実装済み | Phase 7 リファクタリング性能回帰検証レポート |
-| doc/API.md | 未実装 | パブリック API リファレンス |
-| doc/INTEGRATION.md | 未実装 | DataSource / RenderBackend 統合ガイド |
+| 文書 | 役割 |
+|---|---|
+| `doc/RDD.md` | 契約レベル要件 |
+| `doc/INTEGRATION.md` | 実装統合ガイド |
+| `doc/TR-001.md` | PoC 検証エビデンス |
+| `doc/TI-phase9.1.md` | UDP 実測エビデンス |
 
 ---
 
-## 7. リスクと制約
+## 9. リスクと制約
 
 | リスク | 影響 | 緩和策 |
-|--------|------|--------|
-| 実デバイスのデータ特性（バースト、ジッタ、欠損）が合成データと異なる | デシメーション品質の低下、予期せぬドロップ | バックプレッシャーポリシーの柔軟化、ジッタ許容バッファの追加 |
-| PCIe DMA はゼロコピーが必要だがリングバッファは memcpy 前提 | 高帯域デバイスでの性能低下 | IDataSource にゼロコピーパスを拡張可能な設計とする |
-| Vulkan 以外の GPU API (Metal, DirectX) の需要 | ユーザ層の制限 | IRenderBackend 抽象で将来対応可能な構造を維持 |
-| マルチプロセスでの利用（計測器 + 表示が別プロセス） | IPC レイヤが必要 | IPC パイプ実装を grebe-viewer/grebe-sg で検証済み（`apps/common/ipc/`）、他のトランスポートもアプリ側で追加可能 |
-| AVX2/AVX-512 非対応 CPU での性能低下 | SSE2 フォールバックは十分高速 (19,834 MSPS) だが最適ではない | コンパイル時ディスパッチで最適命令セットを自動選択 |
+|---|---|---|
+| Stage 数増加によるオーバーヘッド | レイテンシ増 | バッチ化、融合（stage fusion）戦略 |
+| ownership 混在（owned/borrowed） | バグ、コピー増 | Frame 契約と lint/test を明文化 |
+| UDP 帯域の環境依存 | モード差による誤判定 | NFR をモード別に分離し評価 |
+| 実装詳細の再混入 | RDD の肥大化 | 詳細は INTEGRATION へ隔離 |
 
 ---
 
-## 付録 A: PoC からの移行マッピング
+## 10. 今後の拡張方針
 
-PoC (v0.1.0) の主要コンポーネントと現在のモジュール配置の対応。
+- v3.1: `borrow/release` ベースの zero-copy path を契約追加
+- v3.2: DAG 実行最適化（fusion、NUMA-aware scheduling）
+- v3.3: transport backend 抽象統一（sync/mmsg/iocp など）
 
-| PoC コンポーネント | PoC ファイル | 現在の配置 | 変更内容 |
-|-------------------|-------------|-----------|----------|
-| DataGenerator | data_generator.h/cpp | `src/` (libgrebe) | SyntheticSource の内部エンジンとして残留 |
-| SyntheticSource | *(Phase 2 で新設)* | `src/synthetic_source.h/cpp` (libgrebe) | IDataSource 実装、DataGenerator をラップ |
-| RingBuffer | ring_buffer.h | `src/ring_buffer.h` (libgrebe) | ロックフリー SPSC キュー |
-| Decimator | decimator.h/cpp | `src/decimator.h/cpp` (libgrebe) | MinMax SIMD + LTTB |
-| DecimationThread | decimation_thread.h/cpp | `src/decimation_thread.h/cpp` (libgrebe 内部) | DecimationEngine ファサード経由で使用 |
-| DecimationEngine | *(Phase 4 で新設)* | `include/grebe/decimation_engine.h` (公開 API) | 公開ファサード |
-| IngestionThread | *(Phase 2 で新設)* | `src/ingestion_thread.h/cpp` (libgrebe) | DataSource → RingBuffer ドライバ |
-| BufferManager | buffer_manager.h/cpp | `apps/viewer/` (grebe-viewer) | VulkanRenderer 内部 |
-| Renderer | renderer.h/cpp | `apps/viewer/renderer.h/cpp` (grebe-viewer) | overlay callback 対応、libgrebe から分離 |
-| VulkanRenderer | *(Phase 3 で新設)* | `apps/viewer/vulkan_renderer.h/cpp` (grebe-viewer) | IRenderBackend 実装 |
-| Benchmark | benchmark.h/cpp | `apps/viewer/benchmark.h/cpp` (grebe-viewer) | テレメトリ計測、CSV ロギング |
-| Microbench | microbench.h/cpp | `apps/viewer/microbench.h/cpp` (grebe-viewer) | 独立マイクロベンチマーク (BM-A/B/C/E/F) |
-| Profiler | profiler.h/cpp | `apps/viewer/profiler.h/cpp` (grebe-viewer) | 自動プロファイリング + JSON レポート |
-| HUD | hud.h/cpp | `apps/viewer/hud.h/cpp` (grebe-viewer) | ImGui テレメトリ表示 |
-| PipeTransport | ipc/pipe_transport.h/cpp | `apps/common/ipc/` (grebe-viewer/sg 共有) | IPC パイプ実装 |
-| UdpTransport | *(Phase 9 で新設)* | `apps/common/ipc/udp_transport.h/cpp` (grebe-viewer/sg 共有) | UDP ソケット実装 |
-| TransportSource | *(Phase 2 で IpcSource として新設、Phase 9 でリネーム)* | `apps/viewer/transport_source.h/cpp` (grebe-viewer) | IDataSource 実装 (任意の ITransportConsumer) |
-| EnvelopeVerifier | envelope_verifier.h/cpp | `apps/viewer/envelope_verifier.h/cpp` (grebe-viewer) | プロファイラ内の検証ロジック |
-| ProcessHandle | process_handle.h/cpp | `apps/viewer/process_handle.h/cpp` (grebe-viewer) | grebe-sg サブプロセス起動 |
-
----
-
-## 付録 B: データ量計算
-
-| 構成 | 入力レート | 1 フレーム (60 FPS) | デシメーション後 |
-|------|-----------|--------------------|--------------------|
-| 1ch × 1 MSPS | 2 MB/s | 33 KB | 7.68 KB |
-| 1ch × 100 MSPS | 200 MB/s | 3.3 MB | 7.68 KB |
-| 1ch × 1 GSPS | 2 GB/s | 33 MB | 7.68 KB |
-| 4ch × 1 GSPS | 8 GB/s | 133 MB | 30.72 KB |
-| 8ch × 1 GSPS | 16 GB/s | 267 MB | 61.44 KB |
-
-デシメーション後の GPU 転送量は入力レートに依存せず、画面解像度（1920px 想定）とチャネル数のみに比例する。
-
----
-
-## 付録 C: IDataSource 参照実装パターン
-
-各デバイス種別における IDataSource 実装の想定構成を示す。現時点で実装済みなのは SyntheticSource（libgrebe 同梱）、TransportSource（grebe-viewer 同梱、Pipe/UDP 対応）、FileReader（grebe-sg 同梱）。他はアプリケーション側の実装例として位置づける。
-
-### C.1 SyntheticSource（libgrebe 同梱、実装済み）
-
-PoC の DataGenerator に相当。テスト・デモ・ベンチマーク用。
-
-```
-SyntheticSource
-  │ 周期タイリング (memcpy) or LUT + 位相累積
-  │ → FrameHeader 生成
-  │ → read_frame() で FrameBuffer にコピー
-  ▼
-libgrebe RingBuffer
-```
-
-- バッファ所有権: ユーザ (libgrebe) が確保
-- 通知: 同期（read_frame がデータ生成してすぐ返る）
-- 帯域制約: CPU 速度依存（PoC 実績: ≥ 1 GSPS @ period tiling）
-
-### C.2 FileReader（grebe-sg 実装済み、Phase 8）
-
-GRB バイナリファイルの再生。grebe-sg 内の FileReader が mmap でファイルを読み取り、DataGenerator と同じリングバッファ経由で IPC パイプにストリーミングする。ファイルフォーマットは §3.5 参照。
-
-```
-grebe-sg (FileReader)
-  │ mmap(file) + madvise(MADV_SEQUENTIAL)
-  │ → mmap 領域から RingBuffer に push_bulk
-  │ → サンプルレートに応じたペーシング
-  ▼
-RingBuffer → sender_thread → IPC pipe → grebe-viewer
-```
-
-- バッファ所有権: カーネルページキャッシュ → RingBuffer にコピー
-- 通知: 同期（mmap アクセスはページフォルトで暗黙ブロック）
-- 帯域制約: NVMe SSD で 5–7 GB/s（1 GSPS = 2 GB/s に対し十分）
-- ループ再生: EOF 時に読み取り位置をリセットしてシームレスループ
-- GUI 操作: grebe-sg の GUI から Source: File を選択し、ファイルパスを入力して Load
-
-### C.3 UDP トランスポート（Phase 9 実装済み）
-
-grebe-sg の UDP 送信モードと grebe-viewer の UdpConsumer により、ネットワーク越しのデータストリーミングを実現する。OS 標準のソケット API のみを使用し、外部ライブラリ依存なし。
-
-```
-grebe-sg (--transport=udp)                     grebe-viewer (--udp=PORT)
-  │ DataGenerator / FileReader                   │
-  │ → RingBuffer → sender_thread                 │ UdpConsumer (recvfrom)
-  │ → UdpProducer (sendto)                       │ → TransportSource (IDataSource)
-  │ → FrameHeaderV2 + int16_t[] を               │ → IngestionThread → RingBuffer
-  │   単一 UDP データグラムとして送信              │ → DecimationEngine → 描画
-  └──────── UDP (127.0.0.1 or network) ──────────▶
-```
-
-- バッファ所有権: カーネルソケットバッファ → FrameBuffer にコピー
-- 通知: ブロッキング recvfrom
-- 帯域制約: ループバック ≈ 数 GB/s、1 GbE ≈ 125 MB/s（≈ 62.5 MSPS × 1ch）
-- データグラムサイズ上限: 65000 bytes（block_size は自動制限される）
-- 外部依存: なし（POSIX ソケット / Winsock のみ）
-- クロスプラットフォーム: Linux / Windows 双方で動作
-- 検証方法: grebe-sg を `--transport=udp` で起動し、grebe-viewer を `--udp=5000` で接続
-
-> **高帯域 NIC (DPDK / AF_XDP)**: 10 GbE 以上の帯域が必要な場合は、アプリケーション側で AF_XDP (libbpf) or DPDK (librte_*) を用いた IDataSource を実装して注入する。UdpConsumer のプロトコル処理部分を参考にできる。
-
-### C.4 PCIe FPGA/ADC カード（アプリケーション実装例）
-
-FPGA が PCIe DMA でホストメモリに直接サンプルデータを書き込む構成。
-
-```
-PcieDmaSource
-  │ VFIO で PCIe BAR をユーザ空間にマップ
-  │ → ベンダ DMA ドライバ (XDMA 等) で DMA 転送開始
-  │ → eventfd or polling で DMA 完了検知
-  │ → DMA バッファから FrameBuffer にコピー (v1.0)
-  │   or BorrowedFrame で DMA バッファを直接参照 (v1.1)
-  ▼
-libgrebe RingBuffer
-```
-
-- バッファ所有権: ユーザが確保し IOMMU にマッピング
-- 通知: eventfd（割り込み）or polling
-- 帯域制約: PCIe Gen3 x16 ≈ 16 GB/s、Gen4 ≈ 32 GB/s
-- 外部依存: VFIO + ベンダ固有ドライバ/API (Xilinx XDMA, Intel OPAE 等)
-- フレーミング: デバイスファームウェア定義（IDataSource 実装側で FrameHeader に変換）
-
-### C.5 USB 計測器（アプリケーション実装例）
-
-USB 3.x バルク転送で接続する汎用計測器。
-
-```
-UsbSource
-  │ libusb_submit_transfer() で非同期バルク転送をキューイング
-  │ → コールバックでデータ受信
-  │ → USB パケットを結合・FrameBuffer にコピー
-  ▼
-libgrebe RingBuffer
-```
-
-- バッファ所有権: ユーザが確保し libusb に渡す
-- 通知: コールバック (async) or ブロッキング (sync)
-- 帯域制約: USB 3.0 ≈ 実効 3 Gbps、USB 3.2 Gen2 ≈ 10 Gbps
-- 外部依存: libusb 1.0
-- 制約: VFIO によるカーネルバイパス不可（USB プロトコルスタックが必須）
