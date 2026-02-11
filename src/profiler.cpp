@@ -1,7 +1,7 @@
 #include "profiler.h"
 #include "app_command.h"
 #include "benchmark.h"
-#include "data_generator.h"
+#include "synthetic_source.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -39,16 +39,16 @@ void ProfileRunner::init_envelope_verifiers() {
 
     envelope_verifiers_.resize(channel_count_);
 
-    if (data_gen_) {
-        // Embedded mode: read period buffers from DataGenerator
+    if (synthetic_source_) {
+        // Embedded mode: read period buffers from SyntheticSource
         for (uint32_t ch = 0; ch < channel_count_; ch++) {
-            WaveformType wf = data_gen_->get_channel_waveform(ch);
+            WaveformType wf = synthetic_source_->get_channel_waveform(ch);
             if (wf == WaveformType::WhiteNoise || wf == WaveformType::Chirp) {
                 continue;
             }
 
-            const int16_t* period_buf = data_gen_->period_buffer_ptr(ch);
-            size_t period_len = data_gen_->period_length(ch);
+            const int16_t* period_buf = synthetic_source_->period_buffer_ptr(ch);
+            size_t period_len = synthetic_source_->period_length(ch);
             if (!period_buf || period_len == 0) continue;
 
             envelope_verifiers_[ch].set_period(period_buf, period_len);

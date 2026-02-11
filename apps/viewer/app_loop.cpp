@@ -5,7 +5,9 @@
 #include "swapchain.h"
 #include "renderer.h"
 #include "buffer_manager.h"
-#include "data_generator.h"
+#include "synthetic_source.h"
+#include "ipc_source.h"
+#include "ingestion_thread.h"
 #include "decimation_thread.h"
 #include "benchmark.h"
 #include "hud.h"
@@ -69,28 +71,26 @@ static void process_commands(AppComponents& app) {
         std::visit([&](auto&& c) {
             using T = std::decay_t<decltype(c)>;
             if constexpr (std::is_same_v<T, CmdSetSampleRate>) {
-                if (app.data_gen) {
-                    // Embedded mode: direct DataGenerator control
-                    app.data_gen->set_sample_rate(c.rate);
-                } else if (app.transport) {
-                    // IPC mode: forward to grebe-sg
+                if (app.synthetic_source) {
+                    app.synthetic_source->set_sample_rate(c.rate);
+                } else if (app.ipc_source) {
                     IpcCommand ipc{};
                     ipc.type = IpcCommand::SET_SAMPLE_RATE;
                     ipc.value = c.rate;
-                    app.transport->send_command(ipc);
+                    app.ipc_source->transport().send_command(ipc);
                 }
                 app.dec_thread->set_sample_rate(c.rate);
                 app.current_sample_rate.store(c.rate, std::memory_order_relaxed);
             } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
                 app.dec_thread->cycle_mode();
             } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
-                if (app.data_gen) {
-                    app.data_gen->set_paused(!app.data_gen->is_paused());
-                    app.current_paused.store(app.data_gen->is_paused(), std::memory_order_relaxed);
-                } else if (app.transport) {
+                if (app.synthetic_source) {
+                    app.synthetic_source->set_paused(!app.synthetic_source->is_paused());
+                    app.current_paused.store(app.synthetic_source->is_paused(), std::memory_order_relaxed);
+                } else if (app.ipc_source) {
                     IpcCommand ipc{};
                     ipc.type = IpcCommand::TOGGLE_PAUSED;
-                    app.transport->send_command(ipc);
+                    app.ipc_source->transport().send_command(ipc);
                     app.current_paused.store(!app.current_paused.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 }
             } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
@@ -115,7 +115,7 @@ void run_main_loop(AppComponents& app) {
     // Register GLFW callbacks
     AppState app_state;
     app_state.cmd_queue = app.cmd_queue;
-    app_state.is_ipc_mode = (app.transport != nullptr);
+    app_state.is_ipc_mode = (app.ipc_source != nullptr);
     glfwSetWindowUserPointer(app.window, &app_state);
     glfwSetFramebufferSizeCallback(app.window, framebuffer_resize_callback);
     glfwSetKeyCallback(app.window, key_callback);
@@ -206,13 +206,20 @@ void run_main_loop(AppComponents& app) {
         app.benchmark->set_decimation_time(app.dec_thread->decimation_time_ms());
         app.benchmark->set_decimation_ratio(app.dec_thread->decimation_ratio());
 
-        // Data rate: from DataGenerator (embedded) or atomic updated by receiver (IPC)
-        double data_rate = app.data_gen
-            ? app.data_gen->actual_sample_rate()
-            : app.current_sample_rate.load(std::memory_order_relaxed);
-        bool paused = app.data_gen
-            ? app.data_gen->is_paused()
+        // Data rate: from SyntheticSource (embedded) or IngestionThread (IPC)
+        double data_rate = app.synthetic_source
+            ? app.synthetic_source->actual_sample_rate()
+            : (app.ingestion ? app.ingestion->sample_rate()
+                             : app.current_sample_rate.load(std::memory_order_relaxed));
+        bool paused = app.synthetic_source
+            ? app.synthetic_source->is_paused()
             : app.current_paused.load(std::memory_order_relaxed);
+
+        // Sync decimation thread with actual sample rate (needed for IPC mode
+        // where rate changes come from grebe-sg headers via IngestionThread)
+        if (data_rate > 0.0) {
+            app.dec_thread->set_sample_rate(data_rate);
+        }
 
         app.benchmark->set_data_rate(data_rate);
         app.benchmark->set_ring_fill(app.dec_thread->ring_fill_ratio());
@@ -247,12 +254,12 @@ void run_main_loop(AppComponents& app) {
         }
 
         // SG-side drops (IPC mode only)
-        uint64_t sg_drops = app.sg_drops_total.load(std::memory_order_relaxed);
+        uint64_t sg_drops = app.ipc_source ? app.ipc_source->sg_drops_total() : 0;
 
         // Build ImGui frame
         app.hud->new_frame();
-        // Sequence gaps (IPC mode only)
-        uint64_t seq_gaps = app.seq_gaps.load(std::memory_order_relaxed);
+        // Sequence gaps
+        uint64_t seq_gaps = app.ingestion ? app.ingestion->sequence_gaps() : 0;
 
         // Dynamic time-span limits derived from runtime system settings.
         // Lower: at least one sample period and >= 64 samples for stable visualization.
@@ -312,12 +319,7 @@ void run_main_loop(AppComponents& app) {
         }
 
         // Read producer timestamp before render
-        uint64_t producer_ts = 0;
-        if (app.data_gen) {
-            producer_ts = app.data_gen->last_push_ts_ns();
-        } else {
-            producer_ts = app.latest_producer_ts_ns.load(std::memory_order_relaxed);
-        }
+        uint64_t producer_ts = app.ingestion ? app.ingestion->last_producer_ts_ns() : 0;
 
         // Render (timed)
         t0 = Benchmark::now();
@@ -381,7 +383,7 @@ void run_main_loop(AppComponents& app) {
                           app.benchmark->fps(), app.benchmark->frame_time_avg(),
                           app.num_channels,
                           DecimationThread::mode_name(app.dec_thread->effective_mode()),
-                          app.transport ? " | IPC" : "");
+                          app.ipc_source ? " | IPC" : "");
             glfwSetWindowTitle(app.window, title);
             last_title_update = now;
         }

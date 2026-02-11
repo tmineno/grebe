@@ -210,6 +210,9 @@ add_library(grebe STATIC
     src/envelope_verifier.cpp
     src/profiler.cpp
     src/process_handle.cpp
+    src/synthetic_source.cpp
+    src/ipc_source.cpp
+    src/ingestion_thread.cpp
     src/ipc/pipe_transport.cpp
     # Vulkan rendering
     src/vulkan_context.cpp

@@ -10,7 +10,7 @@
 
 class AppCommandQueue;
 class Benchmark;
-class DataGenerator;
+class SyntheticSource;
 
 struct FrameSample {
     double frame_time_ms  = 0.0;
@@ -91,7 +91,7 @@ public:
                   const std::vector<uint32_t>* per_ch_raw = nullptr);
 
     void set_channel_count(uint32_t n) { channel_count_ = n; }
-    void set_data_generator(DataGenerator* gen) { data_gen_ = gen; }
+    void set_synthetic_source(SyntheticSource* src) { synthetic_source_ = src; }
 
     // Generate report to stdout + JSON file.
     // Returns exit code: 0 = all pass, 1 = any fail.
@@ -120,7 +120,7 @@ private:
     uint64_t sg_drops_at_start_ = 0;  // snapshot at scenario start (SG-side)
     uint64_t seq_gaps_at_start_ = 0;  // snapshot at scenario start (IPC seq gaps)
 
-    DataGenerator* data_gen_ = nullptr;
+    SyntheticSource* synthetic_source_ = nullptr;
     std::vector<EnvelopeVerifier> envelope_verifiers_;
     std::vector<std::vector<int16_t>> ipc_period_buffers_;  // IPC mode: locally-generated period buffers
     bool envelope_verifiers_initialized_ = false;
