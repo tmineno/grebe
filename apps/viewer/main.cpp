@@ -7,7 +7,7 @@
 #include "ipc_source.h"
 #include "ingestion_thread.h"
 #include "ring_buffer.h"
-#include "decimation_thread.h"
+#include "grebe/decimation_engine.h"
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
@@ -165,16 +165,17 @@ int main(int argc, char* argv[]) {
         }
 
         // =====================================================================
-        // Decimation thread (reads from ring buffers, same for both modes)
+        // Decimation engine (reads from ring buffers, same for both modes)
         // =====================================================================
-        constexpr uint32_t DECIMATE_TARGET = 1920 * 2;
-        DecimationMode default_mode = DecimationMode::MinMax;
-        DecimationThread dec_thread;
-        dec_thread.start(ring_ptrs, DECIMATE_TARGET, default_mode);
-        dec_thread.set_sample_rate(1'000'000.0);
+        grebe::DecimationConfig dec_config;
+        dec_config.target_points = 1920 * 2;
+        dec_config.algorithm = grebe::DecimationAlgorithm::MinMax;
+        dec_config.sample_rate = 1'000'000.0;
+        grebe::DecimationEngine dec_engine;
+        dec_engine.start(ring_ptrs, dec_config);
 
         spdlog::info("Streaming started: {}ch, 1 MSPS, decimation={}",
-                     opts.num_channels, DecimationThread::mode_name(default_mode));
+                     opts.num_channels, grebe::DecimationEngine::algorithm_name(dec_config.algorithm));
 
         ProfileRunner profiler;
         profiler.set_channel_count(opts.num_channels);
@@ -208,7 +209,7 @@ int main(int argc, char* argv[]) {
         app.synthetic_source = synthetic_source.get();
         app.ipc_source = ipc_source.get();
         app.ingestion = &ingestion;
-        app.dec_thread = &dec_thread;
+        app.dec_engine = &dec_engine;
         app.benchmark = &benchmark;
         app.profiler = &profiler;
         app.drop_counters = drop_ptrs;
@@ -234,7 +235,7 @@ int main(int argc, char* argv[]) {
             ipc_source->stop();
         }
 
-        dec_thread.stop();
+        dec_engine.stop();
         sg_process.reset();
 
         int exit_code = 0;

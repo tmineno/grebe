@@ -5,7 +5,7 @@
 #include "synthetic_source.h"
 #include "ipc_source.h"
 #include "ingestion_thread.h"
-#include "decimation_thread.h"
+#include "grebe/decimation_engine.h"
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
@@ -75,10 +75,10 @@ static void process_commands(AppComponents& app) {
                     ipc.value = c.rate;
                     app.ipc_source->transport().send_command(ipc);
                 }
-                app.dec_thread->set_sample_rate(c.rate);
+                app.dec_engine->set_sample_rate(c.rate);
                 app.current_sample_rate.store(c.rate, std::memory_order_relaxed);
             } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
-                app.dec_thread->cycle_mode();
+                app.dec_engine->cycle_algorithm();
             } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
                 if (app.synthetic_source) {
                     app.synthetic_source->set_paused(!app.synthetic_source->is_paused());
@@ -138,12 +138,12 @@ void run_main_loop(AppComponents& app) {
         dc.color_a = 1.0f;
     }
 
-    // Per-frame data buffer (receives decimated output)
-    std::vector<int16_t> frame_data;
+    // Per-frame decimation output
+    grebe::DecimationOutput dec_output;
 
     // Visible time-span (runtime clamped by sample rate/ring capacity)
     double visible_time_span_s = 10e-3; // 10 ms default
-    app.dec_thread->set_visible_time_span(visible_time_span_s);
+    app.dec_engine->set_visible_time_span(visible_time_span_s);
 
     // Title update throttle
     double last_title_update = glfwGetTime();
@@ -184,15 +184,14 @@ void run_main_loop(AppComponents& app) {
 
         app.benchmark->frame_begin();
 
-        // Get decimated frame from decimation thread (timed as "drain")
+        // Get decimated frame from decimation engine (timed as "drain")
         auto t0 = Benchmark::now();
-        uint32_t raw_samples = 0;
-        std::vector<uint32_t> per_ch_raw;
-        bool has_new_data = app.dec_thread->try_get_frame(frame_data, raw_samples, per_ch_raw);
+        bool has_new_data = app.dec_engine->try_get_frame(dec_output);
         app.benchmark->set_drain_time(Benchmark::elapsed_ms(t0));
-        app.benchmark->set_samples_per_frame(raw_samples);
-        app.benchmark->set_decimation_time(app.dec_thread->decimation_time_ms());
-        app.benchmark->set_decimation_ratio(app.dec_thread->decimation_ratio());
+        app.benchmark->set_samples_per_frame(dec_output.raw_sample_count);
+        auto dec_metrics = app.dec_engine->metrics();
+        app.benchmark->set_decimation_time(dec_metrics.decimation_time_ms);
+        app.benchmark->set_decimation_ratio(dec_metrics.decimation_ratio);
 
         // Data rate: from SyntheticSource (embedded) or IngestionThread (IPC)
         double data_rate = app.synthetic_source
@@ -205,16 +204,16 @@ void run_main_loop(AppComponents& app) {
 
         // Sync decimation thread with actual sample rate
         if (data_rate > 0.0) {
-            app.dec_thread->set_sample_rate(data_rate);
+            app.dec_engine->set_sample_rate(data_rate);
         }
 
         app.benchmark->set_data_rate(data_rate);
-        app.benchmark->set_ring_fill(app.dec_thread->ring_fill_ratio());
+        app.benchmark->set_ring_fill(dec_metrics.ring_fill_ratio);
 
         // Upload decimated data to GPU (timed)
         t0 = Benchmark::now();
-        if (has_new_data && !frame_data.empty()) {
-            app.render_backend->upload_vertices(frame_data.data(), frame_data.size());
+        if (has_new_data && !dec_output.data.empty()) {
+            app.render_backend->upload_vertices(dec_output.data.data(), dec_output.data.size());
         }
         app.benchmark->set_upload_time(Benchmark::elapsed_ms(t0));
 
@@ -226,7 +225,7 @@ void run_main_loop(AppComponents& app) {
         app.benchmark->set_vertex_count(app.render_backend->vertex_count());
 
         // Update per-channel vertex counts and first_vertex offsets
-        uint32_t per_ch_vtx = app.dec_thread->per_channel_vertex_count();
+        uint32_t per_ch_vtx = dec_output.per_channel_vertex_count;
         uint32_t first_vtx = 0;
         for (uint32_t ch = 0; ch < app.num_channels; ch++) {
             channel_cmds[ch].vertex_count = static_cast<int>(per_ch_vtx);
@@ -261,22 +260,22 @@ void run_main_loop(AppComponents& app) {
             }
             max_time_span_s = std::max(max_time_span_s, min_time_span_s);
             visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
-            app.dec_thread->set_visible_time_span(visible_time_span_s);
+            app.dec_engine->set_visible_time_span(visible_time_span_s);
         }
 
         // Window coverage: raw_samples / expected_samples_per_frame
         double window_coverage = 0.0;
         {
             double expected = data_rate * visible_time_span_s * static_cast<double>(app.num_channels);
-            window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
+            window_coverage = (expected > 0.0) ? (static_cast<double>(dec_output.raw_sample_count) / expected) : 0.0;
             window_coverage = std::clamp(window_coverage, 0.0, 1.0);
         }
 
         app.hud->build_status_bar(*app.benchmark, data_rate,
-                                  app.dec_thread->ring_fill_ratio(),
+                                  dec_metrics.ring_fill_ratio,
                                   app.render_backend->vertex_count(),
                                   paused,
-                                  app.dec_thread->effective_mode(),
+                                  dec_metrics.effective_algorithm,
                                   app.num_channels,
                                   total_drops,
                                   sg_drops,
@@ -296,7 +295,7 @@ void run_main_loop(AppComponents& app) {
                 visible_time_span_s *= 0.5;
             }
             visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
-            app.dec_thread->set_visible_time_span(visible_time_span_s);
+            app.dec_engine->set_visible_time_span(visible_time_span_s);
             spdlog::info("Visible time span -> {:.3f} ms (range {:.3f}..{:.3f} ms)",
                          visible_time_span_s * 1e3,
                          min_time_span_s * 1e3,
@@ -347,15 +346,15 @@ void run_main_loop(AppComponents& app) {
         if (app.enable_profile) {
             app.profiler->on_frame(*app.benchmark, app.render_backend->vertex_count(),
                                    data_rate,
-                                   app.dec_thread->ring_fill_ratio(),
+                                   dec_metrics.ring_fill_ratio,
                                    total_drops, sg_drops,
-                                   seq_gaps, raw_samples,
+                                   seq_gaps, dec_output.raw_sample_count,
                                    e2e_ms,
                                    *app.cmd_queue,
-                                   frame_data.empty() ? nullptr : frame_data.data(),
-                                   app.dec_thread->per_channel_vertex_count(),
-                                   app.dec_thread->effective_mode(),
-                                   per_ch_raw.empty() ? nullptr : &per_ch_raw);
+                                   dec_output.data.empty() ? nullptr : dec_output.data.data(),
+                                   dec_output.per_channel_vertex_count,
+                                   dec_metrics.effective_algorithm,
+                                   dec_output.per_channel_raw_counts.empty() ? nullptr : &dec_output.per_channel_raw_counts);
         }
 
         // Update window title with FPS (throttled to 4 Hz)
@@ -366,7 +365,7 @@ void run_main_loop(AppComponents& app) {
                           "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s%s",
                           app.benchmark->fps(), app.benchmark->frame_time_avg(),
                           app.num_channels,
-                          DecimationThread::mode_name(app.dec_thread->effective_mode()),
+                          grebe::DecimationEngine::algorithm_name(dec_metrics.effective_algorithm),
                           app.ipc_source ? " | IPC" : "");
             glfwSetWindowTitle(app.window, title);
             last_title_update = now;

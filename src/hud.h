@@ -1,6 +1,6 @@
 #pragma once
 
-#include "decimator.h"
+#include "grebe/decimation_engine.h"
 
 #include <vulkan/vulkan.h>
 #include <cstdint>
@@ -34,7 +34,7 @@ public:
     void new_frame();
     void build_status_bar(const Benchmark& bench, double data_rate,
                           double ring_fill, uint32_t vertex_count, bool paused,
-                          DecimationMode dec_mode = DecimationMode::None,
+                          grebe::DecimationAlgorithm dec_algo = grebe::DecimationAlgorithm::None,
                           uint32_t channel_count = 1,
                           uint64_t total_drops = 0,
                           uint64_t sg_drops = 0,

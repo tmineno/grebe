@@ -12,7 +12,7 @@ class Hud;
 class SyntheticSource;
 class IpcSource;
 class IngestionThread;
-class DecimationThread;
+namespace grebe { class DecimationEngine; }
 class Benchmark;
 class ProfileRunner;
 class DropCounter;
@@ -25,7 +25,7 @@ struct AppComponents {
     SyntheticSource* synthetic_source = nullptr;  // non-null in embedded mode
     IpcSource* ipc_source = nullptr;              // non-null in IPC mode
     IngestionThread* ingestion = nullptr;
-    DecimationThread* dec_thread;
+    grebe::DecimationEngine* dec_engine;
     Benchmark* benchmark;
     ProfileRunner* profiler;
     std::vector<DropCounter*> drop_counters;

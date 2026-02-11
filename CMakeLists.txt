@@ -207,6 +207,7 @@ add_library(grebe STATIC
     src/decimator.cpp
     src/data_generator.cpp
     src/decimation_thread.cpp
+    src/decimation_engine.cpp
     src/envelope_verifier.cpp
     src/profiler.cpp
     src/process_handle.cpp

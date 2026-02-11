@@ -1,7 +1,6 @@
 #include "hud.h"
 #include "vulkan_context.h"
 #include "benchmark.h"
-#include "decimation_thread.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -122,7 +121,7 @@ int Hud::consume_time_span_step_request() {
 
 void Hud::build_status_bar(const Benchmark& bench, double data_rate,
                             double ring_fill, uint32_t vertex_count, bool paused,
-                            DecimationMode dec_mode, uint32_t channel_count,
+                            grebe::DecimationAlgorithm dec_algo, uint32_t channel_count,
                             uint64_t total_drops, uint64_t sg_drops,
                             uint64_t seq_gaps, double window_coverage,
                             double visible_time_span_s,
@@ -307,14 +306,14 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
         ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s | %s%s",
                     bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
                     ring_fill * 100.0, display_vtx, vtx_suffix,
-                    DecimationThread::mode_name(dec_mode),
+                    grebe::DecimationEngine::algorithm_name(dec_algo),
                     alert_str,
                     paused ? " | PAUSED" : "");
     } else {
         ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
                     bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
                     ring_fill * 100.0, display_vtx, vtx_suffix,
-                    DecimationThread::mode_name(dec_mode),
+                    grebe::DecimationEngine::algorithm_name(dec_algo),
                     paused ? " | PAUSED" : "");
     }
 

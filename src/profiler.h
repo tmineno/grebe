@@ -1,6 +1,6 @@
 #pragma once
 
-#include "decimator.h"
+#include "grebe/decimation_engine.h"
 #include "envelope_verifier.h"
 #include "waveform_utils.h"
 
@@ -87,7 +87,7 @@ public:
                   AppCommandQueue& cmd_queue,
                   const int16_t* frame_data = nullptr,
                   uint32_t per_ch_vtx = 0,
-                  DecimationMode dec_mode = DecimationMode::MinMax,
+                  grebe::DecimationAlgorithm dec_algo = grebe::DecimationAlgorithm::MinMax,
                   const std::vector<uint32_t>* per_ch_raw = nullptr);
 
     void set_channel_count(uint32_t n) { channel_count_ = n; }
@@ -103,7 +103,7 @@ private:
     void build_scenarios();
     void init_envelope_verifiers();
     double run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
-                                      uint32_t raw_samples, DecimationMode dec_mode,
+                                      uint32_t raw_samples, grebe::DecimationAlgorithm dec_algo,
                                       const std::vector<uint32_t>* per_ch_raw);
 
     std::vector<ScenarioConfig> scenarios_;

@@ -70,10 +70,10 @@ void ProfileRunner::init_envelope_verifiers() {
 }
 
 double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint32_t per_ch_vtx,
-                                                  uint32_t raw_samples, DecimationMode dec_mode,
+                                                  uint32_t raw_samples, grebe::DecimationAlgorithm dec_algo,
                                                   const std::vector<uint32_t>* per_ch_raw) {
     // Only verify MinMax mode with valid data
-    if (dec_mode != DecimationMode::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
+    if (dec_algo != grebe::DecimationAlgorithm::MinMax || per_ch_vtx == 0 || raw_samples == 0) {
         return -1.0;
     }
     if (!per_ch_raw || per_ch_raw->empty()) return -1.0;
@@ -117,7 +117,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
                              AppCommandQueue& cmd_queue,
                              const int16_t* frame_data,
                              uint32_t per_ch_vtx,
-                             DecimationMode dec_mode,
+                             grebe::DecimationAlgorithm dec_algo,
                              const std::vector<uint32_t>* per_ch_raw) {
     if (finished_) return;
 
@@ -158,7 +158,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
     // running verification during warmup populates the cache so measurement
     // frames don't suffer cold-cache spikes.
     if (in_warmup && envelope_verifiers_initialized_ && frame_data && per_ch_vtx > 0) {
-        run_envelope_verification(frame_data, per_ch_vtx, raw_samples, dec_mode, per_ch_raw);
+        run_envelope_verification(frame_data, per_ch_vtx, raw_samples, dec_algo, per_ch_raw);
     }
 
     // Collect metrics during measurement phase
@@ -186,7 +186,7 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         // Envelope verification
         if (frame_data && per_ch_vtx > 0) {
             sample.envelope_match_rate = run_envelope_verification(
-                frame_data, per_ch_vtx, raw_samples, dec_mode, per_ch_raw);
+                frame_data, per_ch_vtx, raw_samples, dec_algo, per_ch_raw);
         }
 
         current_samples_.push_back(sample);
