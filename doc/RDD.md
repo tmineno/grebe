@@ -1,9 +1,11 @@
 # Grebe — 高速リアルタイム波形描画ライブラリ 要件定義書
 
-**バージョン:** 2.0.0
+**バージョン:** 2.1.0
 **最終更新:** 2026-02-11
 
 > **PoC (v0.1.0) からの移行**: 本ドキュメントは PoC フェーズ (Phase 0–13.5) の成果を踏まえ、プロジェクト目的を「任意のインタフェイスを用いた実デバイス入力をサポートする高速リアルタイム波形描画ライブラリ」に再定義したものである。PoC の技術検証結果は [TR-001](TR-001.md) を参照。
+>
+> **v2.1.0 更新**: Phase 1–7.2 のリファクタリング完了を反映。libgrebe を純粋データパイプラインに純化（Vulkan、ImGui、IPC、ベンチマーク等をアプリケーション側に分離）。アーキテクチャ図、API 定義、成果物一覧、移行マッピングを現在の実装に同期。
 
 ---
 
@@ -32,12 +34,12 @@ PoC (v0.1.0, TR-001) において以下が定量的に検証された：
 
 | 項目 | PoC (v0.1.0) | ライブラリ (v2.0) |
 |------|-------------|-------------------|
-| データ入力 | grebe-sg サブプロセス（合成波形） | DataSource 抽象インタフェイス |
-| 描画 | Vulkan + GLFW 直接結合 | RenderBackend 抽象 + Vulkan 実装 |
-| 構成管理 | CLI 引数 + グローバル状態 | 構造体ベースの Config API |
-| メトリクス | ImGui HUD 埋め込み | テレメトリ構造体、呼び出し元が UI を選択 |
-| プロセスモデル | 2 プロセス必須 | シングルプロセスがデフォルト |
-| バックプレッシャー | ≥100 MSPS で無効 | 常時有効、ポリシーは呼び出し元が決定 |
+| データ入力 | grebe-sg サブプロセス（合成波形） | IDataSource 抽象インタフェイス |
+| 描画 | Vulkan + GLFW 直接結合 | IRenderBackend 抽象（ヘッダのみ）+ アプリ側 Vulkan 実装 |
+| 構成管理 | CLI 引数 + グローバル状態 | PipelineConfig 構造体ベース |
+| メトリクス | ImGui HUD 埋め込み | TelemetrySnapshot 構造体、計測・UI はアプリ側 |
+| プロセスモデル | 2 プロセス必須 | シングルプロセス (Embedded) / IPC (grebe-sg) 両対応 |
+| ライブラリ依存 | Vulkan, GLFW, ImGui, VMA 等多数 | spdlog のみ |
 
 ---
 
@@ -114,40 +116,47 @@ PoC (v0.1.0, TR-001) において以下が定量的に検証された：
 ### 3.1 コンポーネント構成
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ アプリケーション (grebe-viewer 等)                           │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────────┐   │
-│  │ UI       │  │ DataSource   │  │ Config /            │   │
-│  │ (ImGui等)│  │ 実装         │  │ Telemetry Consumer  │   │
-│  └────┬─────┘  └──────┬───────┘  └──────────┬──────────┘   │
-│       │               │                     │               │
-├───────┼───────────────┼─────────────────────┼───────────────┤
-│ libgrebe (コアライブラリ)                                   │
-│       │               │                     │               │
-│       │         ┌─────▼──────┐        ┌─────▼──────┐       │
-│       │         │ IDataSource│        │ Config     │       │
-│       │         │ (abstract) │        │ Struct     │       │
-│       │         └─────┬──────┘        └────────────┘       │
-│       │               │                                     │
-│       │     ┌─────────▼──────────┐                         │
-│       │     │ N × RingBuffer     │                         │
-│       │     │ (lock-free SPSC)   │                         │
-│       │     └─────────┬──────────┘                         │
-│       │               │                                     │
-│       │     ┌─────────▼──────────┐                         │
-│       │     │ DecimationEngine   │                         │
-│       │     │ (coordinator +     │                         │
-│       │     │  worker pool)      │                         │
-│       │     └─────────┬──────────┘                         │
-│       │               │                                     │
-│       │     ┌─────────▼──────────┐   ┌─────────────────┐  │
-│       │     │ IRenderBackend     │   │ Telemetry       │  │
-│       │     │ (abstract)         │   │ (metrics struct) │  │
-│       └────▶│  └ VulkanRenderer  │   └─────────────────┘  │
-│             │  └ (将来: 他実装)  │                         │
-│             └────────────────────┘                         │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ アプリケーション (grebe-viewer, grebe-sg 等)                  │
+│                                                              │
+│  ┌───────────┐  ┌──────────────┐  ┌────────────────────┐    │
+│  │ UI / HUD  │  │ DataSource   │  │ Telemetry          │    │
+│  │ (ImGui等) │  │ 実装         │  │ Consumer           │    │
+│  └─────┬─────┘  │ (IpcSource等)│  │ (Benchmark, CSV等) │    │
+│        │        └──────┬───────┘  └─────────┬──────────┘    │
+│        │               │                    │                │
+│  ┌─────▼─────────────┐ │                    │                │
+│  │ VulkanRenderer     │ │                    │                │
+│  │ (IRenderBackend    │ │                    │                │
+│  │  実装)             │ │                    │                │
+│  └─────┬─────────────┘ │                    │                │
+│        │               │                    │                │
+├────────┼───────────────┼────────────────────┼────────────────┤
+│ libgrebe (コアライブラリ — 純粋データパイプライン)             │
+│        │               │                    │                │
+│  ┌─────▼──────┐  ┌─────▼──────┐  ┌─────────▼──────────┐    │
+│  │IRender     │  │ IDataSource│  │ PipelineConfig     │    │
+│  │Backend     │  │ (abstract) │  │ TelemetrySnapshot  │    │
+│  │(abstract,  │  │            │  │ (データ定義のみ)     │    │
+│  │ header only│  └─────┬──────┘  └────────────────────┘    │
+│  └────────────┘        │                                    │
+│              ┌─────────▼──────────┐                         │
+│              │ IngestionThread    │                         │
+│              │ (DataSource→Ring)  │                         │
+│              └─────────┬──────────┘                         │
+│              ┌─────────▼──────────┐                         │
+│              │ N × RingBuffer     │                         │
+│              │ (lock-free SPSC)   │                         │
+│              └─────────┬──────────┘                         │
+│              ┌─────────▼──────────┐                         │
+│              │ DecimationEngine   │                         │
+│              │ (single worker     │                         │
+│              │  thread, N ch)     │                         │
+│              └────────────────────┘                         │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+**libgrebe の責務は純粋なデータパイプライン（取り込み → リングバッファ → デシメーション → 出力）のみ。** 描画 (VulkanRenderer)、UI (HUD/ImGui)、テレメトリ計測 (Benchmark)、IPC トランスポート (PipeTransport) はすべてアプリケーション側に配置される。ライブラリは抽象インタフェイス定義（`IDataSource`, `IRenderBackend`）とデータ型定義（`TelemetrySnapshot`, `PipelineConfig`, `DrawCommand` 等）をヘッダとして提供する。
 
 ### 3.2 主要抽象インタフェイス
 
@@ -185,10 +194,14 @@ public:
     virtual ReadResult read_frame(FrameBuffer& out) = 0;
 
     // データソースの開始/停止
-    virtual bool start() = 0;
+    virtual void start() = 0;
     virtual void stop() = 0;
 };
 ```
+
+**実装済みの IDataSource:**
+- **SyntheticSource** (`src/synthetic_source.h`): libgrebe 同梱、合成波形生成
+- **IpcSource** (`apps/viewer/ipc_source.h`): grebe-viewer 同梱、grebe-sg からのパイプ受信
 
 **設計判断: コピーベースを v1.0 のデフォルトとする根拠**
 
@@ -202,40 +215,58 @@ PCIe DMA や AF_XDP のゼロコピーパスに対応するにはバッファ借
 
 #### IRenderBackend
 
-描画バックエンドの抽象。ライブラリは Vulkan 実装を同梱する。
+描画バックエンドの抽象インタフェイス。libgrebe はヘッダのみ（`include/grebe/render_backend.h`）を提供し、具体実装はアプリケーション側に配置する。grebe-viewer が VulkanRenderer 実装を同梱する。
 
 ```cpp
 class IRenderBackend {
 public:
     virtual ~IRenderBackend() = default;
 
-    virtual bool initialize(const RenderConfig& config) = 0;
+    // 頂点データの GPU アップロード
     virtual void upload_vertices(const int16_t* data, size_t count) = 0;
-    virtual void draw_frame(const DrawCommand* commands, size_t count) = 0;
-    virtual void present() = 0;
-    virtual RenderMetrics metrics() const = 0;
+
+    // 完了した転送を描画スロットに昇格
+    virtual bool swap_buffers() = 0;
+
+    // マルチチャネル波形フレームの描画 (DrawRegion で描画領域を指定)
+    virtual bool draw_frame(const DrawCommand* channels, uint32_t num_channels,
+                            const DrawRegion* region) = 0;
+
+    // ウィンドウリサイズ対応
+    virtual void on_resize(uint32_t width, uint32_t height) = 0;
+
+    // V-Sync 制御
+    virtual void set_vsync(bool enabled) = 0;
+    virtual bool vsync() const = 0;
+
+    // 描画バッファ内の現在の頂点数
+    virtual uint32_t vertex_count() const = 0;
 };
 ```
+
+**実装済み:** VulkanRenderer (`apps/viewer/vulkan_renderer.h`) — Vulkan ベースの高速描画、トリプルバッファリング、overlay callback 対応
 
 ### 3.3 フレームプロトコル
 
-PoC で検証済みの FrameHeaderV2 を継承・拡張する。
+PoC で実装・検証済みの FrameHeaderV2。IPC パイプ通信で使用される。FrameHeaderV2 は libgrebe 外（`apps/common/ipc/contracts.h`）に配置され、grebe-viewer と grebe-sg の間で共有される。
 
 ```cpp
-struct FrameHeader {
-    uint32_t magic;                // 'GRB1'
-    uint32_t header_bytes;         // ヘッダサイズ（前方互換用）
+struct FrameHeaderV2 {
+    uint32_t magic;                // 'GFH2' (0x32484647 LE)
+    uint32_t header_bytes;         // sizeof(FrameHeaderV2)（前方互換用）
     uint64_t sequence;             // 単調増加、ドロップ検出用
     uint64_t producer_ts_ns;       // E2E レイテンシ計測用タイムスタンプ
     uint32_t channel_count;        // 1–8
-    uint32_t samples_per_channel;  // ブロック長
-    uint32_t payload_bytes;        // channel_count × samples_per_channel × 2
-    uint32_t header_crc32c;        // ヘッダ整合性検証
+    uint32_t block_length_samples; // チャネルあたりのサンプル数
+    uint32_t payload_bytes;        // channel_count × block_length_samples × 2
+    uint32_t header_crc32c;        // ヘッダ整合性検証 (プレースホルダ)
     double   sample_rate_hz;       // サンプルレート（動的変更対応）
-    uint64_t source_drops_total;   // ソース側ドロップ累計
+    uint64_t sg_drops_total;       // ソース (grebe-sg) 側ドロップ累計
     uint64_t first_sample_index;   // 絶対サンプル位置
 };
 ```
+
+libgrebe 内部で使用するフレーム形式は `grebe::FrameBuffer`（`include/grebe/data_source.h`）であり、IPC ヘッダからの変換は IpcSource（アプリケーション側）が行う。
 
 ### 3.4 検証済み設計制約 (TR-001 由来)
 
@@ -258,10 +289,12 @@ struct FrameHeader {
 
 - IDataSource を実装することで任意のデータ取得インタフェイスを接続できること
 - ライブラリは以下の参照実装を同梱する：
-  - **SyntheticSource**: 合成信号生成（正弦波、矩形波、鋸歯状波、ホワイトノイズ、チャープ）
+  - **SyntheticSource** (実装済み): 合成信号生成（正弦波、矩形波、鋸歯状波、ホワイトノイズ、チャープ）
+- アプリケーション同梱の IDataSource 実装：
+  - **IpcSource** (実装済み): grebe-sg からの IPC パイプ受信（grebe-viewer 同梱、`apps/viewer/`）
+- 将来の参照実装（未実装）：
   - **FileSource**: バイナリファイルからの再生
-  - **UdpSource**: UDP ソケット経由のデータ受信（ネットワーク入力の参照実装）
-- UdpSource の検証用として **grebe-udp-sender** デモプログラムを同梱する（ローカルループバックで実デバイスを模擬）
+  - **UdpSource**: UDP ソケット経由のデータ受信（grebe-udp-sender デモプログラムと対）
 - 外部実装（高帯域 NIC (DPDK/AF_XDP)、USB3、PCIe）はアプリケーション側で IDataSource を実装して注入する
 
 ### FR-02: デシメーションエンジン
@@ -280,35 +313,37 @@ struct FrameHeader {
 ### FR-04: レンダリングバックエンド
 
 - IRenderBackend を実装することで描画先を差し替え可能であること
-- ライブラリは以下の実装を同梱する：
-  - **VulkanRenderer**: Vulkan ベースの高速描画（PoC で検証済み）
-- プッシュ定数による per-channel 描画パラメータ（振幅スケール、オフセット、色）を維持すること
+- libgrebe はインタフェイス定義（`include/grebe/render_backend.h`）のみを提供し、具体実装はアプリケーション側に配置する
+- grebe-viewer は以下の実装を同梱する：
+  - **VulkanRenderer** (実装済み): Vulkan ベースの高速描画（PoC で検証済み、`apps/viewer/`）
+  - overlay callback (`std::function<void(VkCommandBuffer)>`) による描画拡張ポイント（HUD 等）
+- プッシュ定数による per-channel 描画パラメータ（振幅スケール、オフセット、色、DrawRegion）を維持すること
 
 ### FR-05: テレメトリ / メトリクス API
 
-- 以下のメトリクスをフレーム単位で取得可能な構造体として公開すること：
-  - FPS（瞬時値、ローリング平均）
-  - E2E レイテンシ（平均、p99）
-  - リングバッファ充填率（チャネル別）
-  - デシメーション時間
-  - ソースドロップ数、ビューアドロップ数
-  - エンベロープ一致率（検証有効時）
-- CSV / JSON へのシリアライズユーティリティを提供すること
+- 以下のメトリクスをフレーム単位で取得可能な構造体 (`TelemetrySnapshot`) として公開すること：
+  - FPS、フレーム時間（ローリング平均）
+  - E2E レイテンシ
+  - リングバッファ充填率
+  - パイプライン各相タイミング（drain, upload, swap, render, decimation）
+  - データレート、頂点数、デシメーション比
+- libgrebe は `TelemetrySnapshot` データ型定義のみ提供（`include/grebe/telemetry.h`）
+- テレメトリ計測ロジック（Benchmark クラス）、CSV/JSON シリアライズはアプリケーション側（grebe-viewer）に配置
 
 ### FR-06: 波形忠実度検証
 
-- エンベロープ検証器（PoC 実装ベース）をオプション機能として組み込むこと
+- エンベロープ検証器（PoC 実装ベース）をプロファイリング機能として提供すること
 - 既知の周期信号に対し ±1 LSB の許容誤差でエンベロープ一致率を算出すること
-- カスタムバリデータを登録可能な拡張ポイントを設けること
+- 実装は grebe-viewer のプロファイラに同梱（`apps/viewer/envelope_verifier.h`）— libgrebe のコア機能ではない
 
 ### FR-07: コンフィギュレーション API
 
 - 全設定を構造体ベースで受け渡しすること（CLI パーサーはライブラリに含めない）
-- 主要な設定項目：
-  - チャネル数、リングバッファサイズ
-  - デシメーションモード、ターゲット頂点数
-  - V-Sync モード、プレゼンテーションモード
-  - テレメトリ出力先
+- `PipelineConfig` (`include/grebe/config.h`) の設定項目：
+  - チャネル数 (1–8)、リングバッファサイズ
+  - デシメーション設定（`DecimationConfig`: アルゴリズム、ターゲット頂点数、可視時間幅）
+  - V-Sync モード
+- 将来の拡張項目（未実装）：
   - バックプレッシャーポリシー（ドロップ / ブロック / コールバック通知）
 
 ---
@@ -361,28 +396,30 @@ PoC 実績（TR-001 §概要）を基準とした性能目標。環境: x86_64, 
 
 ### 6.1 ライブラリ
 
-| 成果物 | 説明 |
-|--------|------|
-| libgrebe | コアライブラリ（静的 / 動的リンク対応） |
-| grebe/grebe.h | パブリック API ヘッダ |
-| CMake パッケージ | `find_package(grebe)` で利用可能な CMake config |
+| 成果物 | 状態 | 説明 |
+|--------|------|------|
+| libgrebe | 実装済み | コアデータパイプラインライブラリ（静的リンク）、spdlog のみ依存 |
+| `include/grebe/grebe.h` | 実装済み | パブリック API アンブレラヘッダ |
+| CMake パッケージ | 未実装 | `find_package(grebe)` で利用可能な CMake config |
 
-### 6.2 サンプルアプリケーション
+### 6.2 アプリケーション
 
-| 成果物 | 説明 |
-|--------|------|
-| grebe-viewer | libgrebe を使用した参照実装ビューア（Vulkan + ImGui） |
-| grebe-bench | パフォーマンスベンチマークスイート |
-| grebe-udp-sender | UdpSource 検証用の UDP 送信デモ（ローカルループバック対応） |
+| 成果物 | 状態 | 説明 |
+|--------|------|------|
+| grebe-viewer | 実装済み | 参照実装ビューア（Vulkan + ImGui + IPC + プロファイラ + ベンチマーク） |
+| grebe-sg | 実装済み | 信号発生器プロセス（OpenGL + ImGui GUI、IPC パイプ出力、grebe-viewer から自動起動） |
+| grebe-bench | スタブ | パフォーマンスベンチマークスイート（libgrebe API ベース移行予定） |
+| grebe-udp-sender | 未実装 | UdpSource 検証用の UDP 送信デモ（将来） |
 
 ### 6.3 ドキュメント
 
-| 成果物 | 説明 |
-|--------|------|
-| doc/RDD.md | 本要件定義書 |
-| doc/TR-001.md | PoC 技術レポート（検証済みエビデンス） |
-| doc/API.md | パブリック API リファレンス |
-| doc/INTEGRATION.md | DataSource / RenderBackend 統合ガイド |
+| 成果物 | 状態 | 説明 |
+|--------|------|------|
+| doc/RDD.md | 実装済み | 本要件定義書 |
+| doc/TR-001.md | 実装済み | PoC 技術レポート（検証済みエビデンス） |
+| doc/TI-phase7.md | 実装済み | Phase 7 リファクタリング性能回帰検証レポート |
+| doc/API.md | 未実装 | パブリック API リファレンス |
+| doc/INTEGRATION.md | 未実装 | DataSource / RenderBackend 統合ガイド |
 
 ---
 
@@ -393,27 +430,35 @@ PoC 実績（TR-001 §概要）を基準とした性能目標。環境: x86_64, 
 | 実デバイスのデータ特性（バースト、ジッタ、欠損）が合成データと異なる | デシメーション品質の低下、予期せぬドロップ | バックプレッシャーポリシーの柔軟化、ジッタ許容バッファの追加 |
 | PCIe DMA はゼロコピーが必要だがリングバッファは memcpy 前提 | 高帯域デバイスでの性能低下 | IDataSource にゼロコピーパスを拡張可能な設計とする |
 | Vulkan 以外の GPU API (Metal, DirectX) の需要 | ユーザ層の制限 | IRenderBackend 抽象で将来対応可能な構造を維持 |
-| マルチプロセスでの利用（計測器 + 表示が別プロセス） | IPC レイヤが必要 | PoC の ITransport 抽象を保持、オプショナルモジュールとして提供 |
+| マルチプロセスでの利用（計測器 + 表示が別プロセス） | IPC レイヤが必要 | IPC パイプ実装を grebe-viewer/grebe-sg で検証済み（`apps/common/ipc/`）、他のトランスポートもアプリ側で追加可能 |
 | AVX2/AVX-512 非対応 CPU での性能低下 | SSE2 フォールバックは十分高速 (19,834 MSPS) だが最適ではない | コンパイル時ディスパッチで最適命令セットを自動選択 |
 
 ---
 
 ## 付録 A: PoC からの移行マッピング
 
-PoC (v0.1.0) の主要コンポーネントとライブラリモジュールの対応。
+PoC (v0.1.0) の主要コンポーネントと現在のモジュール配置の対応。
 
-| PoC コンポーネント | PoC ファイル | ライブラリモジュール | 変更内容 |
-|-------------------|-------------|---------------------|----------|
-| DataGenerator | data_generator.h/cpp | SyntheticSource (IDataSource 実装) | 参照実装に降格 |
-| RingBuffer | ring_buffer.h, ring_buffer_view.h | grebe::RingBuffer | API 公開化、RAII 強化 |
-| Decimator | decimator.h/cpp | grebe::DecimationEngine | アルゴリズム拡張ポイント追加 |
-| DecimationThread | decimation_thread.h/cpp | grebe::DecimationEngine (内部) | ワーカープール統合 |
-| BufferManager | buffer_manager.h/cpp | VulkanRenderer (内部) | RenderBackend 内に移動 |
-| Renderer | renderer.h/cpp | grebe::VulkanRenderer (IRenderBackend 実装) | 抽象化 |
-| Benchmark | benchmark.h/cpp, microbench.h/cpp | grebe-bench (サンプルアプリ) | ライブラリ外に分離 |
-| Profiler | profiler.h/cpp | grebe::Telemetry | テレメトリ API に統合 |
-| PipeTransport | ipc/pipe_transport.h/cpp | grebe::PipeTransport (オプショナル) | オプショナルモジュール化 |
-| EnvelopeVerifier | envelope_verifier.h/cpp | grebe::EnvelopeVerifier | オプション機能として公開 |
+| PoC コンポーネント | PoC ファイル | 現在の配置 | 変更内容 |
+|-------------------|-------------|-----------|----------|
+| DataGenerator | data_generator.h/cpp | `src/` (libgrebe) | SyntheticSource の内部エンジンとして残留 |
+| SyntheticSource | *(Phase 2 で新設)* | `src/synthetic_source.h/cpp` (libgrebe) | IDataSource 実装、DataGenerator をラップ |
+| RingBuffer | ring_buffer.h | `src/ring_buffer.h` (libgrebe) | ロックフリー SPSC キュー |
+| Decimator | decimator.h/cpp | `src/decimator.h/cpp` (libgrebe) | MinMax SIMD + LTTB |
+| DecimationThread | decimation_thread.h/cpp | `src/decimation_thread.h/cpp` (libgrebe 内部) | DecimationEngine ファサード経由で使用 |
+| DecimationEngine | *(Phase 4 で新設)* | `include/grebe/decimation_engine.h` (公開 API) | 公開ファサード |
+| IngestionThread | *(Phase 2 で新設)* | `src/ingestion_thread.h/cpp` (libgrebe) | DataSource → RingBuffer ドライバ |
+| BufferManager | buffer_manager.h/cpp | `apps/viewer/` (grebe-viewer) | VulkanRenderer 内部 |
+| Renderer | renderer.h/cpp | `apps/viewer/renderer.h/cpp` (grebe-viewer) | overlay callback 対応、libgrebe から分離 |
+| VulkanRenderer | *(Phase 3 で新設)* | `apps/viewer/vulkan_renderer.h/cpp` (grebe-viewer) | IRenderBackend 実装 |
+| Benchmark | benchmark.h/cpp | `apps/viewer/benchmark.h/cpp` (grebe-viewer) | テレメトリ計測、CSV ロギング |
+| Microbench | microbench.h/cpp | `apps/viewer/microbench.h/cpp` (grebe-viewer) | 独立マイクロベンチマーク (BM-A/B/C/E/F) |
+| Profiler | profiler.h/cpp | `apps/viewer/profiler.h/cpp` (grebe-viewer) | 自動プロファイリング + JSON レポート |
+| HUD | hud.h/cpp | `apps/viewer/hud.h/cpp` (grebe-viewer) | ImGui テレメトリ表示 |
+| PipeTransport | ipc/pipe_transport.h/cpp | `apps/common/ipc/` (grebe-viewer/sg 共有) | IPC パイプ実装 |
+| IpcSource | *(Phase 2 で新設)* | `apps/viewer/ipc_source.h/cpp` (grebe-viewer) | IDataSource 実装 (IPC パイプ) |
+| EnvelopeVerifier | envelope_verifier.h/cpp | `apps/viewer/envelope_verifier.h/cpp` (grebe-viewer) | プロファイラ内の検証ロジック |
+| ProcessHandle | process_handle.h/cpp | `apps/viewer/process_handle.h/cpp` (grebe-viewer) | grebe-sg サブプロセス起動 |
 
 ---
 
@@ -433,9 +478,9 @@ PoC (v0.1.0) の主要コンポーネントとライブラリモジュールの�
 
 ## 付録 C: IDataSource 参照実装パターン
 
-各デバイス種別における IDataSource 実装の想定構成を示す。libgrebe が同梱するのは SyntheticSource、FileSource、UdpSource であり、他はアプリケーション側の実装例として位置づける。
+各デバイス種別における IDataSource 実装の想定構成を示す。現時点で実装済みなのは SyntheticSource（libgrebe 同梱）と IpcSource（grebe-viewer 同梱）のみ。FileSource、UdpSource は将来実装予定。他はアプリケーション側の実装例として位置づける。
 
-### C.1 SyntheticSource（libgrebe 同梱）
+### C.1 SyntheticSource（libgrebe 同梱、実装済み）
 
 PoC の DataGenerator に相当。テスト・デモ・ベンチマーク用。
 
@@ -452,7 +497,7 @@ libgrebe RingBuffer
 - 通知: 同期（read_frame がデータ生成してすぐ返る）
 - 帯域制約: CPU 速度依存（PoC 実績: ≥ 1 GSPS @ period tiling）
 
-### C.2 FileSource（libgrebe 同梱）
+### C.2 FileSource（将来実装予定）
 
 キャプチャ済みバイナリファイルの再生。
 
@@ -469,7 +514,7 @@ libgrebe RingBuffer
 - 通知: 同期（mmap アクセスはページフォルトで暗黙ブロック）
 - 帯域制約: NVMe SSD で 5–7 GB/s（1 GSPS = 2 GB/s に対し十分）
 
-### C.3 UdpSource（libgrebe 同梱）
+### C.3 UdpSource（将来実装予定）
 
 UDP ソケット経由で ADC サンプルを受信する参照実装。OS 標準のソケット API のみを使用し、外部ライブラリ依存なしでネットワーク入力パスを検証できる。
 
