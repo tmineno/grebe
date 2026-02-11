@@ -1,8 +1,8 @@
 # Grebe
 
-**Proof of Concept** — High-speed time-series data stream visualization using Vulkan.
+High-speed real-time waveform rendering framework for 16-bit time-series data streams up to 1 GSPS per channel.
 
-Explores the performance limits of a Vulkan-based rendering pipeline for 16-bit / 1 GSPS class ADC data visualization. Measures throughput and bottlenecks at each pipeline stage (data generation, decimation, GPU transfer, draw).
+**libgrebe** is a pure C++ data pipeline library (ingestion → ring buffer → decimation) with a single dependency (spdlog). **grebe-viewer** is a reference Vulkan application that visualizes the decimated output.
 
 ## Prerequisites
 
@@ -12,29 +12,37 @@ Explores the performance limits of a Vulkan-based rendering pipeline for 16-bit 
 
 All other dependencies are fetched automatically via CMake FetchContent.
 
+## Project Structure
+
+```
+include/grebe/          Public API headers (IDataSource, IRenderBackend, DecimationEngine, etc.)
+src/                    libgrebe core (decimation, ring buffer, ingestion, synthetic source)
+apps/
+  viewer/               grebe-viewer (Vulkan renderer, HUD, profiler, benchmarks, IPC source)
+  sg/                   grebe-sg (signal generator process, OpenGL GUI, IPC pipe output)
+  common/ipc/           Shared IPC protocol (contracts, transport, pipe implementation)
+  bench/                grebe-bench (standalone benchmark suite — stub)
+doc/                    RDD, TR-001, TODO, technical investigation reports
+```
+
 ## Architecture
 
-Two-process architecture with IPC pipe (default) or single-process embedded mode:
-
 ```
-[grebe-sg]  data_generator → ring_buffer → pipe_transport (stdout)
-                                                │
-                                                ▼
-[grebe]     ipc_receiver → ring_buffer(s) → decimation_thread → buffer_manager → renderer
-```
-
-**Embedded mode** (`--embedded`): single-process, DataGenerator runs in-process (no grebe-sg):
-
-```
-data_generator (thread) → ring_buffer(s) → decimation_thread → buffer_manager → renderer
+┌─ Application (grebe-viewer) ──────────────────────────────────────────┐
+│  VulkanRenderer (Vulkan + ImGui HUD)                                  │
+│  IpcSource / Benchmark / Profiler / ProcessHandle                     │
+├───────────────────────────────────────────────────────────────────────┤
+│  libgrebe (data pipeline only, spdlog dependency)                     │
+│                                                                       │
+│  IDataSource → IngestionThread → N × RingBuffer → DecimationEngine   │
+│  (abstract)    (DataSource→Ring)  (lock-free SPSC)  (MinMax/LTTB)    │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Data generator**: Period tiling (memcpy) for periodic waveforms at ≥100 MSPS achieves true 1 GSPS throughput. LUT-based fallback for chirp and low-rate modes.
-- **Ring buffer**: Lock-free SPSC with bulk memcpy push/pop. Configurable size (default 64M samples).
-- **Decimation**: MinMax (SSE2 SIMD) or LTTB, reducing any input to 3840 vertices/frame per channel.
-- **GPU upload**: Triple-buffered staging → device copy with async transfer.
-- **Renderer**: Vulkan LINE_STRIP pipeline, int16 vertex format (2 bytes/vertex), per-channel draw calls with push constants.
-- **IPC transport**: Binary pipe protocol (FrameHeaderV2 + interleaved channel data), sequence continuity and drop tracking.
+Two operational modes:
+
+- **IPC mode** (default): grebe-viewer spawns grebe-sg, which generates data and sends it over a pipe
+- **Embedded mode** (`--embedded`): single-process, SyntheticSource generates data in-process
 
 ## Build
 
@@ -58,14 +66,14 @@ cmake --build build
 ## Run
 
 ```bash
-# IPC mode (default): grebe spawns grebe-sg automatically
-./build/grebe
+# IPC mode (default): grebe-viewer spawns grebe-sg automatically
+./build/grebe-viewer
 
-# Embedded mode: single-process, DataGenerator in-process
-./build/grebe --embedded
+# Embedded mode: single-process, SyntheticSource in-process
+./build/grebe-viewer --embedded
 
 # Multi-channel (1-8 channels)
-./build/grebe --channels=4
+./build/grebe-viewer --channels=4
 
 # Or with preset
 cmake --build --preset linux-release --target run
@@ -73,7 +81,7 @@ cmake --build --preset linux-release --target run
 
 ## Controls
 
-### grebe (viewer)
+### grebe-viewer
 
 | Key | Action |
 |---|---|
@@ -83,26 +91,27 @@ cmake --build --preset linux-release --target run
 | 1-4 | Set sample rate 1M/10M/100M/1G (embedded mode only) |
 | Space | Pause/Resume data generation (embedded mode only) |
 
-In IPC mode, sample rate and pause are controlled by the grebe-sg process.
+In IPC mode, sample rate and pause are controlled via the grebe-sg GUI window.
 
 ## CLI Options
 
-### grebe (viewer)
+### grebe-viewer
 
 | Option | Default | Description |
 |---|---|---|
 | `--embedded` | off | Single-process mode (no grebe-sg) |
 | `--channels=N` | 1 | Number of channels (1-8) |
 | `--ring-size=SIZE` | 64M | Ring buffer size (K/M/G suffix supported) |
-| `--block-size=SIZE` | 16384 | IPC block size per channel per frame (power of 2, 1024-65536) |
+| `--block-size=SIZE` | 16384 | IPC block size per channel per frame |
 | `--no-vsync` | off | Disable V-Sync at startup |
+| `--minimized` | off | Start window iconified (useful for headless profiling) |
 | `--log` | off | CSV telemetry logging to `./tmp/` |
 | `--profile` | off | Automated profiling (1/10/100M/1G SPS), JSON report to `./tmp/` |
-| `--bench` | off | Isolated microbenchmarks (BM-A through BM-E), JSON to `./tmp/` |
+| `--bench` | off | Isolated microbenchmarks (BM-A through BM-F), JSON to `./tmp/` |
 
 ### grebe-sg (signal generator)
 
-grebe-sg is spawned automatically by grebe in IPC mode. It accepts:
+grebe-sg is spawned automatically by grebe-viewer in IPC mode. It provides an OpenGL/ImGui control panel for sample rate, waveform type, and block size. It also accepts CLI arguments:
 
 | Option | Default | Description |
 |---|---|---|
@@ -114,16 +123,16 @@ grebe-sg is spawned automatically by grebe in IPC mode. It accepts:
 
 ```bash
 # Interactive with 4 channels, V-Sync off
-./build/grebe --channels=4 --no-vsync
+./build/grebe-viewer --channels=4 --no-vsync
 
 # Embedded mode with CSV telemetry
-./build/grebe --embedded --log
+./build/grebe-viewer --embedded --log
 
 # Automated profiling with large ring buffer
-./build/grebe --embedded --profile --ring-size=64M
+./build/grebe-viewer --embedded --profile --ring-size=64M
 
 # Isolated microbenchmarks
-./build/grebe --bench
+./build/grebe-viewer --bench
 ```
 
 ## Benchmarks
@@ -132,14 +141,15 @@ Convenience targets for profiling and benchmarks:
 
 ```bash
 cmake --build --preset linux-release --target profile
-cmake --build --preset linux-release --target bench
+cmake --build --preset linux-release --target bench-run
 ```
 
 ## Documentation
 
-- [doc/RDD.md](doc/RDD.md) — Requirements and specification
-- [doc/technical_judgment.md](doc/technical_judgment.md) — Technical investigation notes (TI-01 through TI-10)
-- [doc/TODO.md](doc/TODO.md) — Milestones and future work
+- [doc/RDD.md](doc/RDD.md) — Requirements definition (v2.1.0)
+- [doc/TR-001.md](doc/TR-001.md) — PoC technical report (performance evidence)
+- [doc/TI-phase7.md](doc/TI-phase7.md) — Phase 7 refactoring regression verification
+- [doc/TODO.md](doc/TODO.md) — Development milestones and roadmap
 
 ## License
 
