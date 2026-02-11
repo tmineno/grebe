@@ -1,10 +1,16 @@
 # Grebe — Integration Guide
 
-**Version:** 2.0.0
+**Version:** 2.1.0
 **Last Updated:** 2026-02-11
 
 このドキュメントは、`doc/RDD.md` (v3.1.0) の要件を実装に落とし込むための統合ガイドである。
 RDD が「契約レベル」を扱うのに対し、本書は「実装パターン」を扱う。
+
+ステータス語彙:
+
+- `Current`: 現在実装で成立している状態
+- `Target`: 本バージョンで達成を目指す状態
+- `Planned`: 将来フェーズで実装予定
 
 ---
 
@@ -13,7 +19,8 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 対象:
 
 - Stage 実装の統合パターン
-- Transport (Pipe/UDP/SharedMemory) の統合
+- SharedMemory データプレーンの統合
+- Embedded/Pipe/UDP を SourceStage ingress として SharedMemory へ接続する統合
 - 共有メモリ Queue の設計指針
 - Frame 所有権モデル（Owned/Borrowed）の使い分け
 - Fan-out 構成パターン
@@ -37,12 +44,21 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 - stop 要求に対して bounded time で停止する
 - Borrowed Frame を受け取った場合、処理完了後に release するか Owned に変換する
 
-既存の `IDataSource` 実装は SourceStage アダプタ経由で Stage グラフに接続する。
-`SyntheticSource`, `TransportSource` はそのまま SourceStage として利用可能。
+`IStage` が一次契約であり、`IDataSource` は legacy SourceStage アダプタとして扱う。
+`SyntheticSource`, `TransportSource` は当面アダプタ経由で利用可能。
+`IDataSource` アダプタは `v4.0` で廃止予定（`Planned`）。
+
+`v4.0` 廃止ゲート（`Target`）:
+
+- built-in Source が `IStage` ネイティブ実装へ移行完了
+- デフォルト構成と CI テスト経路から `IDataSource` アダプタ依存を除去
+- SharedMemory システム NFR（NFR-02〜NFR-08）・
+  SourceStage 入力 NFR（NFR-09〜NFR-11）・
+  VisualizationStage NFR（NFR-01, NFR-12）を `grebe-bench` で継続合格
 
 ### 2.2 Frame Protocol
 
-プロセス間伝送は `FrameHeaderV2` + payload を基本単位とする。
+プロセス間伝送（Pipe/UDP 境界）は `FrameHeaderV2` + payload を基本単位とする。
 
 - payload: `[ch0][ch1]...[chN-1]` の channel-major
 - `payload_bytes = channel_count * block_length_samples * sizeof(int16_t)`
@@ -82,25 +98,25 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 用途: ローカル標準運用。
 方式: `grebe-sg` を viewer が subprocess として起動し、stdout/stdin パイプで送受信。
-所有権: Owned（recvfrom / read で受信バッファにコピー）。
+所有権: Owned（`read` で受信バッファにコピー）。
 
 ### 3.4 UDP Transport
 
 用途: 独立プロセス運用、ネットワーク越し運用。
 方式: `UdpProducer`/`UdpConsumer` による datagram 伝送。
-所有権: Owned（recvfrom / recvmmsg で受信バッファにコピー）。
+所有権: Owned（`recvfrom` で受信バッファにコピー）。
 
 実装メモ:
 
-- scatter-gather I/O (sendmsg/WSASendTo) で送信側 memcpy を削減済み
-- sendmmsg/recvmmsg バッチ化で syscall overhead を削減済み (Phase 9.2)
-- WSL2 loopback は datagram サイズ制約が厳しい
-- Windows native では大きい datagram が有効
+- [Current] WSL2 loopback は datagram サイズ制約が厳しい
+- [Current] Windows native では大きい datagram が有効
+- [Target] scatter-gather I/O (sendmsg/WSASendTo) により送信側 memcpy を削減
+- [Planned] sendmmsg/recvmmsg 相当のバッチI/Oで syscall overhead を低減
 
 ### 3.5 SharedMemory Transport
 
 用途: 同一マシン高帯域、マルチコンシューマ。
-方式: 共有メモリ領域上の Queue を介してプロセス間通信。
+方式: 共有メモリ領域上の **コンシューマ別独立 Queue** を介してプロセス間通信。
 所有権: **Borrowed**（コンシューマは shm 上のデータを直接参照、release で返却）。
 
 構成パターン:
@@ -108,23 +124,22 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 ```
 Producer process:
   SourceStage → ShmWriter
-    - 共有メモリ領域にフレームデータを書き込み
-    - write index を atomic に更新
-    - コンシューマの release を待って領域を再利用
+    - 共有 payload pool にフレームデータを書き込み
+    - 各コンシューマ専用 Queue に参照 descriptor を enqueue
 
 Consumer process(es):
   ShmReader → ProcessingStage → ...
-    - read index を atomic に追跡
+    - 自分専用 Queue の read index を atomic に追跡
     - Borrowed Frame として下流に渡す
-    - 処理完了後に release（read index を進める）
+    - 処理完了後に release（descriptor を返却）
 ```
 
 設計指針:
 
 - 共有メモリ領域のサイズは初期化時に固定する（定常状態で確保しない）
-- プロデューサ・コンシューマ間の同期は atomic 操作のみで行う
+- データ整合性は atomic + memory fence で担保し、待機は event 通知または polling で行う
 - コンシューマの crash を heartbeat またはタイムアウトで検知する
-- 複数コンシューマは各自独立した read index を持つ（fan-out）
+- fan-out はコンシューマごとの独立 Queue で構成する
 
 ---
 
@@ -155,14 +170,14 @@ Source → [Queue] ──┤
 
 ### 4.3 SharedMemory Fan-Out
 
-共有メモリ上の Queue で複数コンシューマプロセスが同一データを参照。
+共有 payload pool + コンシューマ別 Queue で複数プロセスに配信。
 
 指針:
 
-- プロデューサは 1 回だけ書き込み、各コンシューマが独立 read index で追跡
-- 領域の再利用は全コンシューマの release 完了後（最遅コンシューマに依存）
-- 遅延コンシューマの切り離し: タイムアウト超過で該当 index を無効化し、
-  プロデューサの書き込みをブロックしない
+- プロデューサは payload を 1 回書き込み、各コンシューマ Queue に参照を配布
+- Queue はコンシューマごとに独立し、遅いコンシューマが他系統をブロックしない
+- payload 再利用は参照カウントを主方式とし、障害時は lease/timeout で強制回収する
+- 遅延コンシューマはタイムアウトで切り離し可能にする
 
 ---
 
@@ -232,7 +247,7 @@ Source → [Queue] ──┤
 | io_uring | Linux | File/NIC | Partial-Yes | Partial |
 | mmap | Cross-platform | File | Yes | N/A |
 | IOCP | Windows | Socket/File | Partial | No |
-| POSIX shm (shm_open) | Linux/macOS | SharedMemory Queue | Yes | N/A |
+| POSIX shm (shm_open) | Linux | SharedMemory Queue | Yes | N/A |
 | Windows shared memory | Windows | SharedMemory Queue | Yes | N/A |
 
 ---
@@ -242,7 +257,7 @@ Source → [Queue] ──┤
 | Axis | DPDK (NIC) | libusb (USB) | VFIO DMA | mmap (File) | SharedMemory |
 |---|---|---|---|---|---|
 | Buffer ownership | mempool | user-managed | user + IOMMU | page cache | shm region (固定長) |
-| Notification | polling | callback/blocking | eventfd/polling | synchronous/fault | atomic + futex/polling |
+| Notification | polling | callback/blocking | eventfd/polling | synchronous/fault | atomic + event/polling |
 | Framing unit | packet | transfer | device-defined | byte stream | Frame 契約準拠 |
 | Frame 所有権 | Owned (コピー後) | Owned | Borrowed | Owned (コピー後) | Borrowed |
 
@@ -284,17 +299,19 @@ Source → [Queue] ──┤
 
 ### 9.2 新しい SourceStage（デバイス統合）を追加する場合
 
-1. `IDataSource` を実装、または直接 `IStage` を実装
-2. `DataSourceInfo` の定義（ch/rate/realtime）
-3. フレーミング規約（channel-major, payload bytes）
-4. drop 計測（source 側 + viewer 側）
-5. 停止シーケンス（`stop()` で確実に unblock）
-6. 所有権モデルの決定（Owned: コピー経路 / Borrowed: ゼロコピー経路）
+1. 直接 `IStage` を実装（一次契約）
+2. 移行期間のみ `IDataSource` adapter を利用可能（`v3.x`, `v4.0` 廃止予定）
+3. `DataSourceInfo` の定義（ch/rate/realtime）
+4. フレーミング規約（channel-major, payload bytes）
+5. drop 計測（source 側 + viewer 側）
+6. 停止シーケンス（`stop()` で確実に unblock）
+7. 所有権モデルの決定（Owned: コピー経路 / Borrowed: ゼロコピー経路）
+8. 新規実装では `IDataSource` adapter 依存を増やさない（`IStage` ネイティブを優先）
 
 ### 9.3 SharedMemory 経路を追加する場合
 
 1. 共有メモリ領域のサイズを算出（チャネル数 × ブロックサイズ × スロット数）
-2. プロデューサ/コンシューマの同期方式を選定（atomic + polling / futex）
+2. プロデューサ/コンシューマの同期方式を選定（整合性: atomic + fence、待機: event/polling）
 3. Borrowed Frame の release パスを全下流 Stage で実装
 4. コンシューマ crash 時の切り離しタイムアウトを設定
 5. Fan-out コンシューマ数の上限を決定（read index の管理コスト）

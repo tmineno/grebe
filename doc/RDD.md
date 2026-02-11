@@ -8,6 +8,9 @@
 > v0.2.0 (Phase 0–9.2) の PoC 成果を基盤に、共有メモリデータプレーンと
 > マルチコンシューマ (fan-out) パイプラインをスコープに加える。
 > 実装手順・OS 固有最適化・統合例は `doc/INTEGRATION.md` を参照。
+>
+> **Positioning:** 本書は **Target Architecture (v3.1)** を記述する。
+> 実装現況との差分は `Current/Target/Planned` の語彙で明示する。
 
 ---
 
@@ -27,13 +30,23 @@
 
 - E2E システム: `libgrebe` + `grebe-viewer` + `grebe-sg`
 - Stage 契約、Frame 契約、実行 Runtime 契約
-- モード別 NFR（Embedded / Pipe / UDP / SharedMemory）
+- NFR 階層（SharedMemory システム NFR + SourceStage 入力 NFR + VisualizationStage NFR）
 - 共有メモリ上の Queue 契約と所有権モデル
 
 非対象:
 
 - DPDK/AF_XDP/VFIO/IOCP 等の実装詳細（`doc/INTEGRATION.md` へ分離）
 - デバイスドライバ実装（アプリケーション側の責務）
+
+### 1.2 ステータス語彙
+
+本書の状態表記は以下に統一する。
+
+| 語彙 | 意味 |
+|---|---|
+| `Current` | 現在の実装で成立している状態 |
+| `Target` | 本バージョンで達成を目指す目標状態 |
+| `Planned` | 将来フェーズで実装予定の状態 |
 
 ---
 
@@ -51,10 +64,13 @@
 
 | モード | 経路 | 主用途 |
 |---|---|---|
-| Embedded | Source(Stage, in-process) -> Runtime -> Visualization(Stage) | 上限性能・デバッグ |
-| Pipe | grebe-sg -> pipe -> grebe-viewer | ローカル標準運用 |
-| UDP | grebe-sg -> UDP -> grebe-viewer | 独立プロセス / ネットワーク運用 |
-| SharedMemory | Producer -> shm region -> Consumer(s) | 同一マシン高帯域・マルチコンシューマ |
+| Embedded | Source(Stage, in-process) -> ShmWriter -> shm region | SourceStage ingress 基準 |
+| Pipe | grebe-sg -> pipe -> SourceStage -> ShmWriter -> shm region | ローカル ingress |
+| UDP | grebe-sg -> UDP -> SourceStage -> ShmWriter -> shm region | 独立プロセス / ネットワーク ingress |
+| SharedMemory | shm region -> Runtime -> Processing/Visualization/Sink | 同一マシン高帯域データプレーン |
+
+本書の v3.1 Target では SharedMemory を主データプレーンとする。
+Embedded/Pipe/UDP は SourceStage が SharedMemory に入力するための ingress バリエーションとして扱う。
 
 SharedMemory モードの想定ユースケース:
 
@@ -214,7 +230,8 @@ public:
 SharedMemory backing の Queue は以下を追加で満たすこと:
 
 - プロデューサ・コンシューマが異なるプロセスでも動作すること
-- 一つの Queue から複数コンシューマへの fan-out を構成可能であること
+- fan-out は **コンシューマごとの独立 Queue** で構成すること
+- payload 再利用は参照カウントを主方式とし、障害時はタイムアウトで強制回収できること
 - プロデューサまたはコンシューマのクラッシュが他方を無期限にブロックしないこと
 
 ### 5.4 Telemetry 契約
@@ -249,8 +266,10 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 
 ### FR-04: Data Source 統合
 
-- `IDataSource` 準拠実装を SourceStage として注入可能であること。
-- 既存 `SyntheticSource` と `TransportSource` を継続利用できること。
+- Source の一次契約は `IStage` であること。
+- 既存 `IDataSource` は移行用 SourceStage アダプタとして利用可能であること（`v3.x` 限定）。
+- `SyntheticSource` と `TransportSource` はアダプタ経由で継続利用できること。
+- `IDataSource` アダプタは `v4.0` で廃止予定（`Planned`）。
 
 ### FR-05: Processing 拡張
 
@@ -270,7 +289,8 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 ### FR-08: 互換トランスポート
 
 - Pipe/UDP は Transport Stage として扱い、上流/下流契約を変更しないこと。
-- 伝送ヘッダは `FrameHeaderV2` 互換を維持すること。
+- `FrameHeaderV2` 互換は **Pipe/UDP 境界** に限定して維持すること。
+- Stage 内部契約は transport ヘッダに依存しないこと。
 
 ### FR-09: コンフィギュレーション
 
@@ -303,7 +323,25 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 
 ## 7. 非機能要件
 
-### NFR-01: SharedMemory 描画性能
+本章の数値要件は **Target (v3.1)** を示す。
+
+### NFR-00: NFR 階層管理
+
+NFR は「SharedMemory システム要件」と「SourceStage 入力要件」に分離して管理する。
+`grebe-bench` では下流の SharedMemory パイプライン条件を固定し、
+ingress 差分（Embedded/Pipe/UDP）のみを比較可能にすること。
+
+| レイヤ | 対象 | 主対象 NFR |
+|---|---|---|
+| SharedMemory システム | Runtime + Queue + 下流 Stage（Visualization を除く） | NFR-02〜NFR-08 |
+| SourceStage ingress | Source 入力経路（Embedded/Pipe/UDP） | NFR-09〜NFR-11 |
+| VisualizationStage | 可視化変換 + Render backend 提出 | NFR-01, NFR-12 |
+
+SourceStage ingress NFR の評価対象は `SourceStage -> ShmWriter enqueue` 完了までとし、
+下流 Processing/Visualization の性能は対象外とする。
+VisualizationStage NFR は別プロファイルで評価すること。
+
+### NFR-01: VisualizationStage 描画性能
 
 | 条件 | 目標 |
 |---|---|
@@ -328,7 +366,8 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 
 - SharedMemory 経路で SourceStage から ProcessingStage への
   frame data の memcpy が 0 回であること（borrow/release）。
-- Embedded モード比で E2E レイテンシが 20% 以内の増加に収まること。
+- SourceStage 入力性能（NFR-09）を基準に、SharedMemory システム E2E レイテンシが
+  20% 以内の増加に収まること。
 
 ### NFR-05: Fan-Out 独立性
 
@@ -354,6 +393,31 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 - SharedMemory Queue のメモリフットプリントは初期化時に固定されること。
 - 固定バッファプールと有界キューで、定常状態でのヒープ確保を 0 にすること。
 
+### NFR-09: SourceStage 入力性能（Embedded）
+
+- in-process SourceStage が SharedMemory Queue へ連続投入できること。
+- `SourceStage -> ShmWriter enqueue` latency (p99) が <= 10 ms であること。
+- 定常状態でドロップ 0 を維持すること。
+
+### NFR-10: SourceStage 入力性能（Pipe）
+
+- Pipe 受信 SourceStage が SharedMemory Queue へ連続投入できること。
+- `SourceStage -> ShmWriter enqueue` latency (p99) が同一条件 Embedded 比で +25% 以内であること。
+- 定常状態でドロップ 0 を維持すること。
+
+### NFR-11: SourceStage 入力性能（UDP）
+
+- UDP 受信 SourceStage が SharedMemory Queue へ連続投入できること。
+- `SourceStage -> ShmWriter enqueue` latency (p99) が同一条件 Embedded 比で +50% 以内であること。
+- 定常状態でドロップ率 <= 0.1% であること。
+- 計測結果は Windows native と WSL2 を分離して記録すること。
+
+### NFR-12: VisualizationStage 処理レイテンシ
+
+- `VisualizationStage::process` から Render backend 提出完了までの latency (p99) が <= 16 ms であること。
+- 60 FPS 条件で frame miss 率 <= 0.1% を維持すること。
+- 1ch と 4ch fan-out x2 条件で同一基準を満たすこと。
+
 ---
 
 ## 8. 成果物
@@ -362,10 +426,10 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 
 | 成果物 | 状態 | 説明 |
 |---|---|---|
-| `libgrebe` | 実装済み（進化中） | Stage 実行基盤の中核 |
-| `grebe-viewer` | 実装済み | Visualization 側参照実装 |
-| `grebe-sg` | 実装済み | Source/Transport 側参照実装 |
-| `grebe-bench` | 部分実装 | モード別 NFR 検証基盤 |
+| `libgrebe` | `Current` | Stage 実行基盤の中核 |
+| `grebe-viewer` | `Current` | Visualization 側参照実装 |
+| `grebe-sg` | `Current` | Source/Transport 側参照実装 |
+| `grebe-bench` | `Planned` | SharedMemory システム NFR + SourceStage 入力 NFR + VisualizationStage NFR 検証基盤 |
 
 ### 8.2 ドキュメント
 
@@ -395,16 +459,23 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 
 | バージョン | 内容 |
 |---|---|
-| v0.3.x | Stage/Runtime 基盤、SharedMemory Queue、fan-out |
-| v0.4.x | NUMA-aware scheduling、stage fusion |
-| v0.5.x | transport backend 抽象統一（sync/mmsg/iocp/shm） |
-| v1.0 | 全モード安定、プロダクション品質 |
+| v3.2 | Stage/Runtime 基盤、SharedMemory Queue、fan-out 実装 |
+| v3.3 | NUMA-aware scheduling、stage fusion |
+| v3.4 | transport backend 抽象統一（sync/mmsg/iocp/shm） |
+| v4.0 | IDataSource adapter 廃止、SharedMemory データプレーン + SourceStage ingress 安定、プロダクション品質 |
+
+### 10.1 v4.0 `IDataSource` 廃止ゲート
+
+- `SyntheticSource` / `TransportSource` を含む built-in Source が `IStage` ネイティブ実装へ移行完了していること。
+- デフォルト構成および CI テスト経路に `IDataSource` adapter 依存が残っていないこと。
+- SharedMemory システム NFR（NFR-02〜NFR-08）・SourceStage 入力 NFR（NFR-09〜NFR-11）・
+  VisualizationStage NFR（NFR-01, NFR-12）が `grebe-bench` で継続合格していること。
 
 ---
 
-## 付録 A: v0.2.0 からの主要変更
+## 付録 A: Legacy アーキテクチャからの主要変更
 
-| 項目 | v0.2.0 | v0.3.0 |
+| 項目 | Legacy | v3.1 Target |
 |---|---|---|
 | アーキテクチャ | libgrebe データパイプライン | Stage/Interface 実行フレームワーク |
 | 処理単位 | 固定パイプライン (Ingestion → Decimation → Render) | 汎用 Stage DAG |
@@ -412,12 +483,12 @@ SharedMemory backing の Queue は以下を追加で満たすこと:
 | データ所有権 | コピーベース (read_frame) | Owned / Borrowed 二層 |
 | マルチコンシューマ | 非対応 | Fan-out (FR-11) |
 | プロセス間通信 | Pipe / UDP | Pipe / UDP / SharedMemory |
-| データソース抽象 | IDataSource | SourceStage (Stage 契約に統合) |
+| データソース抽象 | IDataSource | SourceStage (一次契約) + IDataSource adapter (v3.x 移行、v4.0 廃止予定) |
 | 描画バックエンド抽象 | IRenderBackend | VisualizationStage (Stage 契約に統合) |
 
 ### 継続する設計制約（TR-001 由来）
 
-以下は v0.2.0 で定量検証済みであり、v0.3.0 でも維持する:
+以下は Legacy で定量検証済みであり、v3.1 Target でも維持する:
 
 | 制約 | 根拠 |
 |---|---|
