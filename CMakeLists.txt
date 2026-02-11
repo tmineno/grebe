@@ -120,7 +120,15 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(glfw vk-bootstrap VulkanMemoryAllocator glm spdlog json stb imgui)
+# imgui-filebrowser (single-header ImGui file dialog)
+FetchContent_Declare(
+    imgui_filebrowser
+    GIT_REPOSITORY https://github.com/AirGuanZ/imgui-filebrowser.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(glfw vk-bootstrap VulkanMemoryAllocator glm spdlog json stb imgui imgui_filebrowser)
 
 # stb interface library
 add_library(stb_headers INTERFACE)
@@ -299,6 +307,7 @@ add_executable(grebe-sg
 target_include_directories(grebe-sg PRIVATE
     ${CMAKE_SOURCE_DIR}/apps/sg
     ${CMAKE_SOURCE_DIR}/apps/common
+    ${imgui_filebrowser_SOURCE_DIR}
 )
 
 target_link_libraries(grebe-sg PRIVATE
