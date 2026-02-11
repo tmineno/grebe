@@ -262,9 +262,10 @@ add_executable(grebe-viewer
     apps/viewer/compute_decimator.cpp
     apps/viewer/vma_impl.cpp
     apps/viewer/benchmark.cpp
-    # IPC transport (moved from libgrebe Phase 7.2)
+    # IPC/UDP transport (moved from libgrebe Phase 7.2)
     apps/viewer/transport_source.cpp
     apps/common/ipc/pipe_transport.cpp
+    apps/common/ipc/udp_transport.cpp
 )
 
 add_dependencies(grebe-viewer compile_shaders)
@@ -298,6 +299,10 @@ else()
     target_compile_options(grebe-viewer PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(WIN32)
+    target_link_libraries(grebe-viewer PRIVATE ws2_32)
+endif()
+
 # =============================================================================
 # grebe-sg — Signal generator executable
 # =============================================================================
@@ -306,8 +311,9 @@ add_executable(grebe-sg
     apps/sg/sg_main.cpp
     apps/sg/data_generator.cpp
     apps/sg/file_reader.cpp
-    # IPC transport (shared with grebe-viewer, Phase 7.2)
+    # IPC/UDP transport (shared with grebe-viewer, Phase 7.2)
     apps/common/ipc/pipe_transport.cpp
+    apps/common/ipc/udp_transport.cpp
     # Native file dialogs
     ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
 )
@@ -328,6 +334,10 @@ if(MSVC)
     target_compile_options(grebe-sg PRIVATE /W4)
 else()
     target_compile_options(grebe-sg PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(WIN32)
+    target_link_libraries(grebe-sg PRIVATE ws2_32)
 endif()
 
 # =============================================================================
