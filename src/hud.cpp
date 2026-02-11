@@ -1,6 +1,5 @@
 #include "hud.h"
 #include "vulkan_context.h"
-#include "benchmark.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -119,15 +118,14 @@ int Hud::consume_time_span_step_request() {
     return std::clamp(step, -1, 1);
 }
 
-void Hud::build_status_bar(const Benchmark& bench, double data_rate,
-                            double ring_fill, uint32_t vertex_count, bool paused,
+void Hud::build_status_bar(const grebe::TelemetrySnapshot& telemetry,
+                            bool paused,
                             grebe::DecimationAlgorithm dec_algo, uint32_t channel_count,
                             uint64_t total_drops, uint64_t sg_drops,
                             uint64_t seq_gaps, double window_coverage,
                             double visible_time_span_s,
                             double min_time_span_s,
-                            double max_time_span_s,
-                            double e2e_latency_ms) {
+                            double max_time_span_s) {
     ImGuiIO& io = ImGui::GetIO();
     float bar_height = 44.0f;
     float screen_width = io.DisplaySize.x;
@@ -262,16 +260,16 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
 
     // Format data rate
     const char* rate_suffix = "SPS";
-    double display_rate = data_rate;
-    if (data_rate >= 1e9)      { display_rate = data_rate / 1e9; rate_suffix = "GSPS"; }
-    else if (data_rate >= 1e6) { display_rate = data_rate / 1e6; rate_suffix = "MSPS"; }
-    else if (data_rate >= 1e3) { display_rate = data_rate / 1e3; rate_suffix = "KSPS"; }
+    double display_rate = telemetry.data_rate;
+    if (telemetry.data_rate >= 1e9)      { display_rate = telemetry.data_rate / 1e9; rate_suffix = "GSPS"; }
+    else if (telemetry.data_rate >= 1e6) { display_rate = telemetry.data_rate / 1e6; rate_suffix = "MSPS"; }
+    else if (telemetry.data_rate >= 1e3) { display_rate = telemetry.data_rate / 1e3; rate_suffix = "KSPS"; }
 
     // Format vertex count
     const char* vtx_suffix = "";
-    double display_vtx = static_cast<double>(vertex_count);
-    if (vertex_count >= 1'000'000)  { display_vtx = vertex_count / 1e6; vtx_suffix = "M"; }
-    else if (vertex_count >= 1'000) { display_vtx = vertex_count / 1e3; vtx_suffix = "K"; }
+    double display_vtx = static_cast<double>(telemetry.vertex_count);
+    if (telemetry.vertex_count >= 1'000'000)  { display_vtx = telemetry.vertex_count / 1e6; vtx_suffix = "M"; }
+    else if (telemetry.vertex_count >= 1'000) { display_vtx = telemetry.vertex_count / 1e3; vtx_suffix = "K"; }
 
     // Line 1: overview
     bool has_drops = (total_drops > 0 || sg_drops > 0);
@@ -304,29 +302,29 @@ void Hud::build_status_bar(const Benchmark& bench, double data_rate,
 
     if (has_drops || has_gaps) {
         ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s | %s%s",
-                    bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
-                    ring_fill * 100.0, display_vtx, vtx_suffix,
+                    telemetry.fps, telemetry.frame_time_ms, channel_count, display_rate, rate_suffix,
+                    telemetry.ring_fill_ratio * 100.0, display_vtx, vtx_suffix,
                     grebe::DecimationEngine::algorithm_name(dec_algo),
                     alert_str,
                     paused ? " | PAUSED" : "");
     } else {
         ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
-                    bench.fps(), bench.frame_time_avg(), channel_count, display_rate, rate_suffix,
-                    ring_fill * 100.0, display_vtx, vtx_suffix,
+                    telemetry.fps, telemetry.frame_time_ms, channel_count, display_rate, rate_suffix,
+                    telemetry.ring_fill_ratio * 100.0, display_vtx, vtx_suffix,
                     grebe::DecimationEngine::algorithm_name(dec_algo),
                     paused ? " | PAUSED" : "");
     }
 
     // Line 2: per-phase telemetry + visible span + window coverage + E2E latency
-    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %.0f | Span: %s | WCov: %.0f%% | E2E: %.1f ms",
-                bench.drain_time_avg(),
-                bench.decimation_time_avg(), bench.decimation_ratio(),
-                bench.upload_time_avg(),
-                bench.swap_time_avg(), bench.render_time_avg(),
-                bench.samples_per_frame_avg(),
+    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %u | Span: %s | WCov: %.0f%% | E2E: %.1f ms",
+                telemetry.drain_time_ms,
+                telemetry.decimation_time_ms, telemetry.decimation_ratio,
+                telemetry.upload_time_ms,
+                telemetry.swap_time_ms, telemetry.render_time_ms,
+                telemetry.samples_per_frame,
                 span_str,
                 window_coverage * 100.0,
-                e2e_latency_ms);
+                telemetry.e2e_latency_ms);
 
     ImGui::End();
 }

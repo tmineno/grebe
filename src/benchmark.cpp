@@ -101,6 +101,24 @@ void Benchmark::set_e2e_latency(double ms) {
     e2e_avg_ = e2e_rolling_.avg;
 }
 
+grebe::TelemetrySnapshot Benchmark::snapshot() const {
+    grebe::TelemetrySnapshot s;
+    s.fps = fps_;
+    s.frame_time_ms = frame_time_avg_;
+    s.drain_time_ms = drain_avg_;
+    s.upload_time_ms = upload_avg_;
+    s.swap_time_ms = swap_avg_;
+    s.render_time_ms = render_avg_;
+    s.decimation_time_ms = decimate_avg_;
+    s.decimation_ratio = decimate_ratio_;
+    s.data_rate = data_rate_;
+    s.ring_fill_ratio = ring_fill_;
+    s.e2e_latency_ms = e2e_avg_;
+    s.samples_per_frame = static_cast<uint32_t>(samples_avg_);
+    s.vertex_count = static_cast<uint32_t>(vtx_avg_);
+    return s;
+}
+
 bool Benchmark::start_logging(const std::string& path) {
     log_file_.open(path, std::ios::out | std::ios::trunc);
     if (!log_file_.is_open()) {

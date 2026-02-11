@@ -7,7 +7,7 @@
 #include "ipc_source.h"
 #include "ingestion_thread.h"
 #include "ring_buffer.h"
-#include "grebe/decimation_engine.h"
+#include "grebe/config.h"
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
@@ -69,8 +69,17 @@ int main(int argc, char* argv[]) {
         VulkanRenderer vk_renderer;
         vk_renderer.initialize(window, SHADER_DIR);
 
-        // Apply --no-vsync if requested
-        if (opts.no_vsync) {
+        // Build pipeline configuration from CLI options
+        grebe::PipelineConfig pipeline_config;
+        pipeline_config.channel_count = opts.num_channels;
+        pipeline_config.ring_buffer_size = opts.ring_size;
+        pipeline_config.decimation.target_points = 1920 * 2;
+        pipeline_config.decimation.algorithm = grebe::DecimationAlgorithm::MinMax;
+        pipeline_config.decimation.sample_rate = 1'000'000.0;
+        pipeline_config.vsync = !opts.no_vsync;
+
+        // Apply V-Sync from config
+        if (!pipeline_config.vsync) {
             vk_renderer.set_vsync(false);
             spdlog::info("V-Sync disabled via --no-vsync");
         }
@@ -111,19 +120,19 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         std::vector<std::unique_ptr<RingBuffer<int16_t>>> ring_buffers;
         std::vector<RingBuffer<int16_t>*> ring_ptrs;
-        for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
+        for (uint32_t ch = 0; ch < pipeline_config.channel_count; ch++) {
             ring_buffers.push_back(
-                std::make_unique<RingBuffer<int16_t>>(opts.ring_size + 1));
+                std::make_unique<RingBuffer<int16_t>>(pipeline_config.ring_buffer_size + 1));
             ring_ptrs.push_back(ring_buffers.back().get());
         }
         spdlog::info("Ring buffers: {}ch x {} samples ({} MB each)",
-                     opts.num_channels, opts.ring_size,
-                     opts.ring_size * 2 / (1024 * 1024));
+                     pipeline_config.channel_count, pipeline_config.ring_buffer_size,
+                     pipeline_config.ring_buffer_size * 2 / (1024 * 1024));
 
         // Per-channel drop counters
         std::vector<std::unique_ptr<DropCounter>> drop_counters;
         std::vector<DropCounter*> drop_ptrs;
-        for (uint32_t ch = 0; ch < opts.num_channels; ch++) {
+        for (uint32_t ch = 0; ch < pipeline_config.channel_count; ch++) {
             drop_counters.push_back(std::make_unique<DropCounter>());
             drop_ptrs.push_back(drop_counters.back().get());
         }
@@ -139,17 +148,17 @@ int main(int argc, char* argv[]) {
 
         if (opts.embedded) {
             synthetic_source = std::make_unique<SyntheticSource>(
-                opts.num_channels, 1'000'000.0, WaveformType::Sine);
+                pipeline_config.channel_count, 1'000'000.0, WaveformType::Sine);
             synthetic_source->start();
             ingestion.start(*synthetic_source, ring_ptrs, drop_ptrs);
             spdlog::info("Embedded mode: SyntheticSource + IngestionThread");
         } else {
             std::string sg_path = find_sg_binary(argv[0]);
             std::vector<std::string> sg_args;
-            sg_args.push_back("--channels=" + std::to_string(opts.num_channels));
+            sg_args.push_back("--channels=" + std::to_string(pipeline_config.channel_count));
             sg_args.push_back("--block-size=" + std::to_string(opts.block_size));
-            if (opts.ring_size != 67'108'864) {
-                sg_args.push_back("--ring-size=" + std::to_string(opts.ring_size));
+            if (pipeline_config.ring_buffer_size != 67'108'864) {
+                sg_args.push_back("--ring-size=" + std::to_string(pipeline_config.ring_buffer_size));
             }
 
             sg_process = std::make_unique<ProcessHandle>();
@@ -160,25 +169,22 @@ int main(int argc, char* argv[]) {
             spdlog::info("IPC mode: spawned grebe-sg PID {}", sg_process->pid());
 
             pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
-            ipc_source = std::make_unique<IpcSource>(*pipe_consumer, opts.num_channels);
+            ipc_source = std::make_unique<IpcSource>(*pipe_consumer, pipeline_config.channel_count);
             ipc_source->start();
         }
 
         // =====================================================================
         // Decimation engine (reads from ring buffers, same for both modes)
         // =====================================================================
-        grebe::DecimationConfig dec_config;
-        dec_config.target_points = 1920 * 2;
-        dec_config.algorithm = grebe::DecimationAlgorithm::MinMax;
-        dec_config.sample_rate = 1'000'000.0;
         grebe::DecimationEngine dec_engine;
-        dec_engine.start(ring_ptrs, dec_config);
+        dec_engine.start(ring_ptrs, pipeline_config.decimation);
 
         spdlog::info("Streaming started: {}ch, 1 MSPS, decimation={}",
-                     opts.num_channels, grebe::DecimationEngine::algorithm_name(dec_config.algorithm));
+                     pipeline_config.channel_count,
+                     grebe::DecimationEngine::algorithm_name(pipeline_config.decimation.algorithm));
 
         ProfileRunner profiler;
-        profiler.set_channel_count(opts.num_channels);
+        profiler.set_channel_count(pipeline_config.channel_count);
         profiler.set_synthetic_source(synthetic_source.get());
         if (opts.enable_profile) {
             spdlog::info("Profile mode enabled");
@@ -192,7 +198,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Start IPC ingestion after dec_thread is ready
+        // Start IPC ingestion after dec_engine is ready
         if (ipc_source) {
             ingestion.start(*ipc_source, ring_ptrs, drop_ptrs);
         }
@@ -213,8 +219,8 @@ int main(int argc, char* argv[]) {
         app.benchmark = &benchmark;
         app.profiler = &profiler;
         app.drop_counters = drop_ptrs;
-        app.num_channels = opts.num_channels;
-        app.ring_capacity_samples = opts.ring_size;
+        app.num_channels = pipeline_config.channel_count;
+        app.ring_capacity_samples = pipeline_config.ring_buffer_size;
         app.enable_profile = opts.enable_profile;
         app.current_sample_rate.store(1e6, std::memory_order_relaxed);
         app.current_paused.store(false, std::memory_order_relaxed);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "grebe/telemetry.h"
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -42,6 +44,9 @@ public:
     double decimation_time_avg()   const { return decimate_avg_; }
     double decimation_ratio()      const { return decimate_ratio_; }
     double e2e_latency_avg()       const { return e2e_avg_; }
+
+    // Produce a public telemetry snapshot (rolling averages)
+    grebe::TelemetrySnapshot snapshot() const;
 
     // Telemetry CSV logging
     bool start_logging(const std::string& path);

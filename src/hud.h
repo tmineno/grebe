@@ -1,13 +1,13 @@
 #pragma once
 
 #include "grebe/decimation_engine.h"
+#include "grebe/telemetry.h"
 
 #include <vulkan/vulkan.h>
 #include <cstdint>
 
 struct GLFWwindow;
 class VulkanContext;
-class Benchmark;
 
 class Hud {
 public:
@@ -32,8 +32,8 @@ public:
 
     // Call each frame before draw_frame
     void new_frame();
-    void build_status_bar(const Benchmark& bench, double data_rate,
-                          double ring_fill, uint32_t vertex_count, bool paused,
+    void build_status_bar(const grebe::TelemetrySnapshot& telemetry,
+                          bool paused,
                           grebe::DecimationAlgorithm dec_algo = grebe::DecimationAlgorithm::None,
                           uint32_t channel_count = 1,
                           uint64_t total_drops = 0,
@@ -42,8 +42,7 @@ public:
                           double window_coverage = 0.0,
                           double visible_time_span_s = 0.0,
                           double min_time_span_s = 0.0,
-                          double max_time_span_s = 0.0,
-                          double e2e_latency_ms = 0.0);
+                          double max_time_span_s = 0.0);
 
     // +1: up, -1: down, 0: no action
     int consume_time_span_step_request();

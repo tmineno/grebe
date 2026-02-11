@@ -271,9 +271,8 @@ void run_main_loop(AppComponents& app) {
             window_coverage = std::clamp(window_coverage, 0.0, 1.0);
         }
 
-        app.hud->build_status_bar(*app.benchmark, data_rate,
-                                  dec_metrics.ring_fill_ratio,
-                                  app.render_backend->vertex_count(),
+        auto telemetry = app.benchmark->snapshot();
+        app.hud->build_status_bar(telemetry,
                                   paused,
                                   dec_metrics.effective_algorithm,
                                   app.num_channels,
@@ -283,8 +282,7 @@ void run_main_loop(AppComponents& app) {
                                   window_coverage,
                                   visible_time_span_s,
                                   min_time_span_s,
-                                  max_time_span_s,
-                                  app.benchmark->e2e_latency_avg());
+                                  max_time_span_s);
 
         // Apply time-span adjustments requested by HUD arrow buttons
         int span_step = app.hud->consume_time_span_step_request();
@@ -363,7 +361,7 @@ void run_main_loop(AppComponents& app) {
             char title[128];
             std::snprintf(title, sizeof(title),
                           "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s%s",
-                          app.benchmark->fps(), app.benchmark->frame_time_avg(),
+                          telemetry.fps, telemetry.frame_time_ms,
                           app.num_channels,
                           grebe::DecimationEngine::algorithm_name(dec_metrics.effective_algorithm),
                           app.ipc_source ? " | IPC" : "");
