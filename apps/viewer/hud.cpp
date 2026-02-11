@@ -122,7 +122,7 @@ void Hud::build_status_bar(const grebe::TelemetrySnapshot& telemetry,
                             bool paused,
                             grebe::DecimationAlgorithm dec_algo, uint32_t channel_count,
                             uint64_t total_drops, uint64_t sg_drops,
-                            uint64_t seq_gaps, double window_coverage,
+                            double window_coverage,
                             double visible_time_span_s,
                             double min_time_span_s,
                             double max_time_span_s) {
@@ -273,58 +273,42 @@ void Hud::build_status_bar(const grebe::TelemetrySnapshot& telemetry,
 
     // Line 1: overview
     bool has_drops = (total_drops > 0 || sg_drops > 0);
-    bool has_gaps = (seq_gaps > 0);
-    // Build alert string for drops/gaps
-    char alert_str[128] = "";
-    if (has_drops || has_gaps) {
-        char* p = alert_str;
-        size_t rem = sizeof(alert_str);
+    if (has_drops) {
+        char alert_str[128] = "";
         if (sg_drops > 0 && total_drops > 0) {
-            int n = std::snprintf(p, rem, "DROP:%llu+SG:%llu",
+            std::snprintf(alert_str, sizeof(alert_str), "DROP:%llu+SG:%llu",
                           static_cast<unsigned long long>(total_drops),
                           static_cast<unsigned long long>(sg_drops));
-            p += n; rem -= static_cast<size_t>(n);
         } else if (sg_drops > 0) {
-            int n = std::snprintf(p, rem, "SG-DROP:%llu",
+            std::snprintf(alert_str, sizeof(alert_str), "SG-DROP:%llu",
                           static_cast<unsigned long long>(sg_drops));
-            p += n; rem -= static_cast<size_t>(n);
-        } else if (total_drops > 0) {
-            int n = std::snprintf(p, rem, "DROP:%llu",
+        } else {
+            std::snprintf(alert_str, sizeof(alert_str), "DROP:%llu",
                           static_cast<unsigned long long>(total_drops));
-            p += n; rem -= static_cast<size_t>(n);
         }
-        if (has_gaps) {
-            if (p != alert_str) { *p++ = ' '; rem--; }
-            std::snprintf(p, rem, "GAP:%llu",
-                          static_cast<unsigned long long>(seq_gaps));
-        }
-    }
-
-    if (has_drops || has_gaps) {
-        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s | %s%s",
+        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Vtx: %.1f%s | %s | %s%s",
                     telemetry.fps, telemetry.frame_time_ms, channel_count, display_rate, rate_suffix,
-                    telemetry.ring_fill_ratio * 100.0, display_vtx, vtx_suffix,
+                    display_vtx, vtx_suffix,
                     grebe::DecimationEngine::algorithm_name(dec_algo),
                     alert_str,
                     paused ? " | PAUSED" : "");
     } else {
-        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Ring: %.0f%% | Vtx: %.1f%s | %s%s",
+        ImGui::Text("FPS: %.1f | Frame: %.2f ms | %uch | Rate: %.1f %s | Vtx: %.1f%s | %s%s",
                     telemetry.fps, telemetry.frame_time_ms, channel_count, display_rate, rate_suffix,
-                    telemetry.ring_fill_ratio * 100.0, display_vtx, vtx_suffix,
+                    display_vtx, vtx_suffix,
                     grebe::DecimationEngine::algorithm_name(dec_algo),
                     paused ? " | PAUSED" : "");
     }
 
-    // Line 2: per-phase telemetry + visible span + window coverage + E2E latency
-    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %u | Span: %s | WCov: %.0f%% | E2E: %.1f ms",
+    // Line 2: per-phase telemetry + visible span + window coverage
+    ImGui::Text("Drain: %.2f ms | Dec: %.2f ms (%.0f:1) | Upload: %.2f ms | Swap: %.2f ms | Render: %.2f ms | Smp/f: %u | Span: %s | WCov: %.0f%%",
                 telemetry.drain_time_ms,
                 telemetry.decimation_time_ms, telemetry.decimation_ratio,
                 telemetry.upload_time_ms,
                 telemetry.swap_time_ms, telemetry.render_time_ms,
                 telemetry.samples_per_frame,
                 span_str,
-                window_coverage * 100.0,
-                telemetry.e2e_latency_ms);
+                window_coverage * 100.0);
 
     ImGui::End();
 }

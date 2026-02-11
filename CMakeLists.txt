@@ -221,6 +221,14 @@ add_library(grebe STATIC
     src/decimation_engine.cpp
     src/synthetic_source.cpp
     src/ingestion_thread.cpp
+    # Phase 11: Queue contract
+    src/core/in_process_queue.cpp
+    # Phase 12: Stage wrappers
+    src/stages/data_source_adapter.cpp
+    src/stages/decimation_stage.cpp
+    src/stages/visualization_stage.cpp
+    # Phase 13: Runtime
+    src/core/linear_runtime.cpp
 )
 
 target_include_directories(grebe PUBLIC
@@ -266,6 +274,8 @@ add_executable(grebe-viewer
     apps/viewer/transport_source.cpp
     apps/common/ipc/pipe_transport.cpp
     apps/common/ipc/udp_transport.cpp
+    # Phase 12: Transport stage wrappers
+    apps/common/stages/transport_rx_stage.cpp
 )
 
 add_dependencies(grebe-viewer compile_shaders)
@@ -314,6 +324,8 @@ add_executable(grebe-sg
     # IPC/UDP transport (shared with grebe-viewer, Phase 7.2)
     apps/common/ipc/pipe_transport.cpp
     apps/common/ipc/udp_transport.cpp
+    # Phase 12: Transport stage wrappers
+    apps/common/stages/transport_tx_stage.cpp
     # Native file dialogs
     ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
 )

@@ -22,8 +22,6 @@ struct TelemetrySnapshot {
 
     // Data flow
     double data_rate = 0.0;            // samples/sec
-    double ring_fill_ratio = 0.0;      // [0, 1]
-    double e2e_latency_ms = 0.0;
 
     // Counts
     uint32_t samples_per_frame = 0;

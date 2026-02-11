@@ -11,11 +11,13 @@ class VulkanRenderer;
 class Hud;
 class SyntheticSource;
 class TransportSource;
-class IngestionThread;
-namespace grebe { class DecimationEngine; }
+namespace grebe {
+    class LinearRuntime;
+    class DecimationStage;
+    class VisualizationStage;
+}
 class Benchmark;
 class ProfileRunner;
-class DropCounter;
 
 struct AppComponents {
     GLFWwindow* window;
@@ -24,13 +26,12 @@ struct AppComponents {
     Hud* hud;
     SyntheticSource* synthetic_source = nullptr;  // non-null in embedded mode
     TransportSource* transport_source = nullptr;   // non-null in IPC/UDP mode
-    IngestionThread* ingestion = nullptr;
-    grebe::DecimationEngine* dec_engine;
+    grebe::LinearRuntime* runtime = nullptr;
+    grebe::DecimationStage* dec_stage = nullptr;   // direct control (mode, rate)
+    grebe::VisualizationStage* viz_stage = nullptr;  // display windowing + decimation
     Benchmark* benchmark;
     ProfileRunner* profiler;
-    std::vector<DropCounter*> drop_counters;
     uint32_t num_channels;
-    size_t ring_capacity_samples = 0;     // per-channel ring capacity (samples)
     bool enable_profile;
     std::atomic<double> current_sample_rate{1e6};
     std::atomic<bool>   current_paused{false};

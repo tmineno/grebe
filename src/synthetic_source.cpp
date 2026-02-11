@@ -101,6 +101,8 @@ void SyntheticSource::rebuild_period_buffer(double sample_rate, double frequency
 
     for (size_t ch = 0; ch < num_channels_; ch++) {
         auto& cs = channel_states_[ch];
+        size_t old_period_len = cs.period_len;
+        size_t old_pos = cs.period_pos;
         WaveformType ch_type = channel_waveforms_[ch].load(std::memory_order_relaxed);
         cached_types_[ch] = ch_type;
 
@@ -139,7 +141,14 @@ void SyntheticSource::rebuild_period_buffer(double sample_rate, double frequency
                 }
             }
         }
-        cs.period_pos = 0;
+        // Preserve phase fraction across period length change
+        if (old_period_len > 0 && cs.period_len > 0) {
+            cs.period_pos = static_cast<size_t>(
+                static_cast<double>(old_pos) / static_cast<double>(old_period_len)
+                * static_cast<double>(cs.period_len)) % cs.period_len;
+        } else {
+            cs.period_pos = 0;
+        }
     }
 
     cached_sample_rate_ = sample_rate;

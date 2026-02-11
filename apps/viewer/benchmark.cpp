@@ -91,16 +91,6 @@ void Benchmark::set_data_rate(double samples_per_sec) {
     data_rate_ = samples_per_sec;
 }
 
-void Benchmark::set_ring_fill(double ratio) {
-    ring_fill_ = ratio;
-}
-
-void Benchmark::set_e2e_latency(double ms) {
-    e2e_raw_ = ms;
-    e2e_rolling_.push(ms);
-    e2e_avg_ = e2e_rolling_.avg;
-}
-
 grebe::TelemetrySnapshot Benchmark::snapshot() const {
     grebe::TelemetrySnapshot s;
     s.fps = fps_;
@@ -112,8 +102,6 @@ grebe::TelemetrySnapshot Benchmark::snapshot() const {
     s.decimation_time_ms = decimate_avg_;
     s.decimation_ratio = decimate_ratio_;
     s.data_rate = data_rate_;
-    s.ring_fill_ratio = ring_fill_;
-    s.e2e_latency_ms = e2e_avg_;
     s.samples_per_frame = static_cast<uint32_t>(samples_avg_);
     s.vertex_count = static_cast<uint32_t>(vtx_avg_);
     return s;
@@ -132,7 +120,7 @@ bool Benchmark::start_logging(const std::string& path) {
 
     // CSV header
     log_file_ << "frame,time_s,frame_ms,fps,drain_ms,decimate_ms,upload_ms,swap_ms,render_ms,"
-                 "samples,vtx,decimate_ratio,data_rate,ring_fill,e2e_ms\n";
+                 "samples,vtx,decimate_ratio,data_rate\n";
 
     spdlog::info("Telemetry logging started: {}", path);
     return true;
@@ -150,23 +138,22 @@ void Benchmark::write_log_row() {
     // CSV row (every frame)
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-                  "%lu,%.4f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.1f,%.0f,%.3f,%.2f\n",
+                  "%lu,%.4f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%.1f,%.0f\n",
                   static_cast<unsigned long>(log_frame_), time_s,
                   frame_time_ms_, fps_,
                   drain_raw_, decimate_raw_, upload_raw_, swap_raw_, render_raw_,
-                  samples_raw_, vtx_raw_, decimate_ratio_raw_, data_rate_, ring_fill_,
-                  e2e_raw_);
+                  samples_raw_, vtx_raw_, decimate_ratio_raw_, data_rate_);
     log_file_ << buf;
 
     // Stdout summary (throttled to ~1 Hz: every 60 frames)
     if (log_stdout_counter_ % 60 == 0) {
         spdlog::info("[telemetry] frame={} fps={:.1f} frame={:.2f}ms "
                      "drain={:.2f} dec={:.2f}({:.0f}:1) upload={:.2f} swap={:.2f} render={:.2f} "
-                     "smp={} vtx={} rate={:.0f} ring={:.1f}%",
+                     "smp={} vtx={} rate={:.0f}",
                      log_frame_, fps_, frame_time_ms_,
                      drain_raw_, decimate_raw_, decimate_ratio_raw_,
                      upload_raw_, swap_raw_, render_raw_,
-                     samples_raw_, vtx_raw_, data_rate_, ring_fill_ * 100.0);
+                     samples_raw_, vtx_raw_, data_rate_);
     }
 
     log_frame_++;

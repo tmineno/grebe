@@ -110,10 +110,9 @@ double ProfileRunner::run_envelope_verification(const int16_t* frame_data, uint3
 }
 
 void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
-                             double data_rate, double ring_fill,
+                             double data_rate,
                              uint64_t total_drops, uint64_t sg_drops,
-                             uint64_t seq_gaps, uint32_t raw_samples,
-                             double e2e_latency_ms,
+                             uint32_t raw_samples,
                              AppCommandQueue& cmd_queue,
                              const int16_t* frame_data,
                              uint32_t per_ch_vtx,
@@ -133,7 +132,6 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         current_samples_.reserve(scenario.measure_frames);
         drops_at_start_ = total_drops;
         sg_drops_at_start_ = sg_drops;
-        seq_gaps_at_start_ = seq_gaps;
         // Clear envelope verifier caches for new scenario (period may change)
         for (auto& v : envelope_verifiers_) v.clear();
         envelope_verifiers_initialized_ = false;
@@ -174,14 +172,11 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         sample.vertex_count  = vertex_count;
         sample.decimate_ratio = bench.decimation_ratio();
         sample.data_rate     = data_rate;
-        sample.ring_fill     = ring_fill;
 
         // Window coverage: raw_samples / expected_samples_per_frame
         double frame_ms = bench.frame_time_ms();
         double expected = (frame_ms > 0.0) ? (scenario.sample_rate * frame_ms / 1000.0) : 0.0;
         sample.window_coverage = (expected > 0.0) ? (static_cast<double>(raw_samples) / expected) : 0.0;
-
-        sample.e2e_latency_ms = e2e_latency_ms;
 
         // Envelope verification
         if (frame_data && per_ch_vtx > 0) {
@@ -202,9 +197,8 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
 
         // Extract per-metric vectors and compute stats
         std::vector<double> v_frame, v_drain, v_dec, v_upload, v_swap, v_render;
-        std::vector<double> v_samples, v_vtx, v_rate, v_ring, v_coverage;
+        std::vector<double> v_samples, v_vtx, v_rate, v_coverage;
         std::vector<double> v_envelope;
-        std::vector<double> v_e2e;
 
         for (const auto& s : current_samples_) {
             v_frame.push_back(s.frame_time_ms);
@@ -216,13 +210,9 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
             v_samples.push_back(static_cast<double>(s.samples));
             v_vtx.push_back(static_cast<double>(s.vertex_count));
             v_rate.push_back(s.data_rate);
-            v_ring.push_back(s.ring_fill);
             v_coverage.push_back(s.window_coverage);
             if (s.envelope_match_rate >= 0.0) {
                 v_envelope.push_back(s.envelope_match_rate);
-            }
-            if (s.e2e_latency_ms > 0.0) {
-                v_e2e.push_back(s.e2e_latency_ms);
             }
         }
 
@@ -239,19 +229,16 @@ void ProfileRunner::on_frame(const Benchmark& bench, uint32_t vertex_count,
         result.samples_per_frame = compute_stats(v_samples);
         result.vertex_count      = compute_stats(v_vtx);
         result.data_rate         = compute_stats(v_rate);
-        result.ring_fill         = compute_stats(v_ring);
         result.window_coverage   = compute_stats(v_coverage);
         result.envelope_match_rate = compute_stats(v_envelope);
-        result.e2e_latency_ms      = compute_stats(v_e2e);
 
         result.drop_total = total_drops - drops_at_start_;
         result.sg_drop_total = sg_drops - sg_drops_at_start_;
-        result.seq_gaps = seq_gaps - seq_gaps_at_start_;
         result.pass = result.fps.avg >= scenario.min_fps_threshold;
 
-        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} drops={} gaps={} coverage={:.1f}% envelope={:.1f}% \xe2\x86\x92 {}",
+        spdlog::info("[profile] Scenario '{}' complete: FPS avg={:.1f} min={:.1f} max={:.1f} drops={} coverage={:.1f}% envelope={:.1f}% \xe2\x86\x92 {}",
                      scenario.name, result.fps.avg, result.fps.min, result.fps.max,
-                     result.drop_total, result.seq_gaps,
+                     result.drop_total,
                      result.window_coverage.avg * 100.0,
                      v_envelope.empty() ? -1.0 : result.envelope_match_rate.avg * 100.0,
                      result.pass ? "PASS" : "FAIL");
@@ -345,14 +332,14 @@ int ProfileRunner::generate_report() const {
 
     // Stdout report
     spdlog::info("========== PROFILE REPORT ==========");
-    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
+    spdlog::info("{:<12} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8}",
                  "Scenario", "FPS avg", "FPS min", "FPS p95",
                  "Frame ms", "Render ms", "Vtx avg", "Smp/f", "Drops",
-                 "WinCov%", "Env%", "E2E ms", "Result");
-    spdlog::info("{}", std::string(142, '-'));
+                 "WinCov%", "Env%", "Result");
+    spdlog::info("{}", std::string(122, '-'));
 
     for (const auto& r : results_) {
-        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>7.1f}% {:>7.1f}% {:>8.1f} {:>8}",
+        spdlog::info("{:<12} {:>8.1f} {:>8.1f} {:>8.1f} {:>10.2f} {:>10.2f} {:>10.0f} {:>10.0f} {:>10} {:>7.1f}% {:>7.1f}% {:>8}",
                      r.config.name,
                      r.fps.avg, r.fps.min, r.fps.p95,
                      r.frame_ms.avg, r.render_ms.avg,
@@ -360,12 +347,11 @@ int ProfileRunner::generate_report() const {
                      r.drop_total,
                      r.window_coverage.avg * 100.0,
                      r.envelope_match_rate.avg * 100.0,
-                     r.e2e_latency_ms.avg,
                      r.pass ? "PASS" : "FAIL");
         if (!r.pass) overall_pass = false;
     }
 
-    spdlog::info("{}", std::string(132, '='));
+    spdlog::info("{}", std::string(122, '='));
     spdlog::info("Overall: {}", overall_pass ? "PASS" : "FAIL");
 
     // JSON report
@@ -394,14 +380,11 @@ int ProfileRunner::generate_report() const {
             {"samples_per_frame", stats_to_json(r.samples_per_frame)},
             {"vertex_count",      stats_to_json(r.vertex_count)},
             {"data_rate",         stats_to_json(r.data_rate)},
-            {"ring_fill",         stats_to_json(r.ring_fill)},
             {"window_coverage",   stats_to_json(r.window_coverage)},
             {"envelope_match_rate", stats_to_json(r.envelope_match_rate)},
-            {"e2e_latency_ms",     stats_to_json(r.e2e_latency_ms)},
         };
         s["drop_total"] = r.drop_total;
         s["sg_drop_total"] = r.sg_drop_total;
-        s["seq_gaps"] = r.seq_gaps;
         s["pass"] = r.pass;
         scenarios_json.push_back(s);
     }

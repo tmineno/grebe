@@ -23,10 +23,8 @@ struct FrameSample {
     uint32_t vertex_count = 0;
     double decimate_ratio = 1.0;
     double data_rate      = 0.0;
-    double ring_fill      = 0.0;
     double window_coverage = 0.0;       // raw_samples / expected_samples_per_frame
     double envelope_match_rate = -1.0;  // -1.0 = skipped
-    double e2e_latency_ms = 0.0;       // producer_ts → render_done
 };
 
 struct MetricStats {
@@ -58,13 +56,10 @@ struct ScenarioResult {
     MetricStats samples_per_frame;
     MetricStats vertex_count;
     MetricStats data_rate;
-    MetricStats ring_fill;
     MetricStats window_coverage;
     MetricStats envelope_match_rate;  // excludes skipped frames (-1)
-    MetricStats e2e_latency_ms;
     uint64_t drop_total = 0;     // net viewer-side drops during measurement phase
     uint64_t sg_drop_total = 0;  // SG-side drops at end of measurement phase
-    uint64_t seq_gaps = 0;       // IPC sequence gaps during measurement phase
     bool pass = false;
 };
 
@@ -80,10 +75,9 @@ public:
     // Collects metrics during measurement phase.
     // Sets glfwSetWindowShouldClose when all done.
     void on_frame(const Benchmark& bench, uint32_t vertex_count,
-                  double data_rate, double ring_fill,
+                  double data_rate,
                   uint64_t total_drops, uint64_t sg_drops,
-                  uint64_t seq_gaps, uint32_t raw_samples,
-                  double e2e_latency_ms,
+                  uint32_t raw_samples,
                   AppCommandQueue& cmd_queue,
                   const int16_t* frame_data = nullptr,
                   uint32_t per_ch_vtx = 0,
@@ -118,7 +112,6 @@ private:
     uint32_t channel_count_ = 1;
     uint64_t drops_at_start_ = 0;     // snapshot at scenario start
     uint64_t sg_drops_at_start_ = 0;  // snapshot at scenario start (SG-side)
-    uint64_t seq_gaps_at_start_ = 0;  // snapshot at scenario start (IPC seq gaps)
 
     SyntheticSource* synthetic_source_ = nullptr;
     std::vector<EnvelopeVerifier> envelope_verifiers_;

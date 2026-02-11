@@ -1,11 +1,12 @@
 #include "app_loop.h"
 #include "app_command.h"
-#include "drop_counter.h"
 #include "vulkan_renderer.h"
 #include "synthetic_source.h"
 #include "transport_source.h"
-#include "ingestion_thread.h"
-#include "grebe/decimation_engine.h"
+#include "grebe/runtime.h"
+#include "stages/decimation_stage.h"
+#include "stages/visualization_stage.h"
+#include "grebe/batch.h"
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
@@ -17,7 +18,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -58,8 +61,39 @@ static void key_callback(GLFWwindow* window, int key, int /*scancode*/, int acti
             q.push(CmdTogglePaused{});
         }
         break;
+    case GLFW_KEY_G:       q.push(CmdDebugDump{});              break;
     default: break;
     }
+}
+
+// Map internal DecimationMode to public DecimationAlgorithm for HUD/profiler
+static grebe::DecimationAlgorithm to_algorithm(DecimationMode mode) {
+    switch (mode) {
+    case DecimationMode::None:   return grebe::DecimationAlgorithm::None;
+    case DecimationMode::MinMax: return grebe::DecimationAlgorithm::MinMax;
+    case DecimationMode::LTTB:   return grebe::DecimationAlgorithm::LTTB;
+    }
+    return grebe::DecimationAlgorithm::None;
+}
+
+// Cycle: None → MinMax → LTTB → None
+static DecimationMode next_decimation_mode(DecimationMode m) {
+    switch (m) {
+    case DecimationMode::None:   return DecimationMode::MinMax;
+    case DecimationMode::MinMax: return DecimationMode::LTTB;
+    case DecimationMode::LTTB:   return DecimationMode::None;
+    }
+    return DecimationMode::None;
+}
+
+// Algorithm name for display
+static const char* decimation_mode_name(DecimationMode m) {
+    switch (m) {
+    case DecimationMode::None:   return "None";
+    case DecimationMode::MinMax: return "MinMax";
+    case DecimationMode::LTTB:   return "LTTB";
+    }
+    return "Unknown";
 }
 
 static void process_commands(AppComponents& app) {
@@ -75,10 +109,17 @@ static void process_commands(AppComponents& app) {
                     ipc.value = c.rate;
                     app.transport_source->transport().send_command(ipc);
                 }
-                app.dec_engine->set_sample_rate(c.rate);
+                if (app.dec_stage) {
+                    app.dec_stage->set_sample_rate(c.rate);
+                }
                 app.current_sample_rate.store(c.rate, std::memory_order_relaxed);
             } else if constexpr (std::is_same_v<T, CmdCycleDecimationMode>) {
-                app.dec_engine->cycle_algorithm();
+                if (app.dec_stage) {
+                    auto cur = app.dec_stage->mode();
+                    auto next = next_decimation_mode(cur);
+                    app.dec_stage->set_mode(next);
+                    spdlog::info("Decimation mode → {}", decimation_mode_name(next));
+                }
             } else if constexpr (std::is_same_v<T, CmdTogglePaused>) {
                 if (app.synthetic_source) {
                     app.synthetic_source->set_paused(!app.synthetic_source->is_paused());
@@ -95,6 +136,11 @@ static void process_commands(AppComponents& app) {
                 spdlog::info("V-Sync {}", app.render_backend->vsync() ? "ON" : "OFF");
             } else if constexpr (std::is_same_v<T, CmdQuit>) {
                 glfwSetWindowShouldClose(app.window, GLFW_TRUE);
+            } else if constexpr (std::is_same_v<T, CmdDebugDump>) {
+                if (app.viz_stage) {
+                    app.viz_stage->request_debug_dump("./tmp");
+                    spdlog::info("Debug dump requested (G key)");
+                }
             }
         }, cmd);
     }
@@ -138,15 +184,14 @@ void run_main_loop(AppComponents& app) {
         dc.color_a = 1.0f;
     }
 
-    // Per-frame decimation output
-    grebe::DecimationOutput dec_output;
-
-    // Visible time-span (runtime clamped by sample rate/ring capacity)
+    // Visible time-span (GUI-side display scaling)
     double visible_time_span_s = 10e-3; // 10 ms default
-    app.dec_engine->set_visible_time_span(visible_time_span_s);
 
     // Title update throttle
     double last_title_update = glfwGetTime();
+
+    // Current effective algorithm for display
+    auto effective_algo = grebe::DecimationAlgorithm::MinMax;
 
     while (!glfwWindowShouldClose(app.window)) {
         glfwPollEvents();
@@ -184,38 +229,95 @@ void run_main_loop(AppComponents& app) {
 
         app.benchmark->frame_begin();
 
-        // Get decimated frame from decimation engine (timed as "drain")
-        auto t0 = Benchmark::now();
-        bool has_new_data = app.dec_engine->try_get_frame(dec_output);
-        app.benchmark->set_drain_time(Benchmark::elapsed_ms(t0));
-        app.benchmark->set_samples_per_frame(dec_output.raw_sample_count);
-        auto dec_metrics = app.dec_engine->metrics();
-        app.benchmark->set_decimation_time(dec_metrics.decimation_time_ms);
-        app.benchmark->set_decimation_ratio(dec_metrics.decimation_ratio);
 
-        // Data rate: from SyntheticSource (embedded) or IngestionThread (IPC)
+        // Drain ALL frames from runtime pipeline (preserves continuity)
+        auto t0 = Benchmark::now();
+        std::vector<grebe::Frame> viz_input;
+        while (auto f = app.runtime->poll_output()) {
+            viz_input.push_back(std::move(*f));
+        }
+        app.benchmark->set_drain_time(Benchmark::elapsed_ms(t0));
+
+        // Save last pipeline frame for profiler envelope verification
+        // (before viz_stage double-decimation)
+        grebe::Frame last_pipeline_frame = grebe::Frame::make_owned(0, 0);
+        if (!viz_input.empty()) {
+            const auto& src = viz_input.back();
+            last_pipeline_frame = grebe::Frame::make_owned(src.channel_count, src.samples_per_channel);
+            last_pipeline_frame.sample_rate_hz = src.sample_rate_hz;
+            last_pipeline_frame.sequence = src.sequence;
+            if (src.data_count() > 0) {
+                std::memcpy(last_pipeline_frame.mutable_data(), src.data(),
+                            src.data_count() * sizeof(int16_t));
+            }
+        }
+
+        // Feed all frames to visualization stage (accumulate + window + decimate)
+        uint32_t per_ch_vtx = 0;
+        uint32_t raw_sample_count = 0;
+        grebe::Frame display_frame = grebe::Frame::make_owned(0, 0);
+        {
+            grebe::BatchView view(std::move(viz_input));
+            grebe::BatchWriter writer;
+            grebe::ExecContext ctx{};
+            app.viz_stage->process(view, writer, ctx);
+
+            auto display_frames = writer.take();
+            if (!display_frames.empty()) {
+                display_frame = std::move(display_frames.back());
+                per_ch_vtx = display_frame.samples_per_channel;
+                raw_sample_count = display_frame.channel_count * display_frame.samples_per_channel;
+
+                t0 = Benchmark::now();
+                app.render_backend->upload_vertices(display_frame.data(), display_frame.data_count());
+                app.benchmark->set_upload_time(Benchmark::elapsed_ms(t0));
+            } else {
+                app.benchmark->set_upload_time(0.0);
+            }
+        }
+
+        app.benchmark->set_samples_per_frame(raw_sample_count);
+
+        // Get telemetry from runtime
+        auto telem = app.runtime->telemetry();
+        double dec_time_ms = 0.0;
+        uint64_t queue_drops = 0;
+        for (auto& st : telem) {
+            if (st.name == "DecimationStage") {
+                dec_time_ms = st.avg_process_time_ms;
+            }
+            queue_drops += st.queue_dropped;
+        }
+
+        // Effective algorithm
+        if (app.dec_stage) {
+            effective_algo = to_algorithm(app.dec_stage->effective_mode());
+        }
+
+        // Decimation ratio: target / raw_per_channel (approximate)
+        double dec_ratio = 1.0;
+        if (app.dec_stage && per_ch_vtx > 0) {
+            dec_ratio = static_cast<double>(app.dec_stage->target_points())
+                      / static_cast<double>(per_ch_vtx);
+        }
+
+        app.benchmark->set_decimation_time(dec_time_ms);
+        app.benchmark->set_decimation_ratio(dec_ratio);
+
+        // Data rate: from SyntheticSource (embedded) or stored atomic
         double data_rate = app.synthetic_source
             ? app.synthetic_source->actual_sample_rate()
-            : (app.ingestion ? app.ingestion->sample_rate()
-                             : app.current_sample_rate.load(std::memory_order_relaxed));
+            : app.current_sample_rate.load(std::memory_order_relaxed);
         bool paused = app.synthetic_source
             ? app.synthetic_source->is_paused()
             : app.current_paused.load(std::memory_order_relaxed);
 
-        // Sync decimation thread with actual sample rate
-        if (data_rate > 0.0) {
-            app.dec_engine->set_sample_rate(data_rate);
+        // Sync decimation stage with actual sample rate
+        if (data_rate > 0.0 && app.dec_stage) {
+            app.dec_stage->set_sample_rate(data_rate);
         }
 
         app.benchmark->set_data_rate(data_rate);
-        app.benchmark->set_ring_fill(dec_metrics.ring_fill_ratio);
-
-        // Upload decimated data to GPU (timed)
-        t0 = Benchmark::now();
-        if (has_new_data && !dec_output.data.empty()) {
-            app.render_backend->upload_vertices(dec_output.data.data(), dec_output.data.size());
-        }
-        app.benchmark->set_upload_time(Benchmark::elapsed_ms(t0));
 
         // Promote completed transfers to draw position (timed)
         t0 = Benchmark::now();
@@ -225,7 +327,6 @@ void run_main_loop(AppComponents& app) {
         app.benchmark->set_vertex_count(app.render_backend->vertex_count());
 
         // Update per-channel vertex counts and first_vertex offsets
-        uint32_t per_ch_vtx = dec_output.per_channel_vertex_count;
         uint32_t first_vtx = 0;
         for (uint32_t ch = 0; ch < app.num_channels; ch++) {
             channel_cmds[ch].vertex_count = static_cast<int>(per_ch_vtx);
@@ -233,19 +334,11 @@ void run_main_loop(AppComponents& app) {
             first_vtx += per_ch_vtx;
         }
 
-        // Compute total drops across all channels (viewer-side)
-        uint64_t total_drops = 0;
-        for (auto* dc : app.drop_counters) {
-            if (dc) total_drops += dc->total_dropped();
-        }
-
         // SG-side drops (IPC mode only)
         uint64_t sg_drops = app.transport_source ? app.transport_source->sg_drops_total() : 0;
 
         // Build ImGui frame
         app.hud->new_frame();
-        // Sequence gaps
-        uint64_t seq_gaps = app.ingestion ? app.ingestion->sequence_gaps() : 0;
 
         // Dynamic time-span limits
         double min_time_span_s = 1e-6;
@@ -253,32 +346,24 @@ void run_main_loop(AppComponents& app) {
         if (data_rate > 0.0) {
             const double sample_period_s = 1.0 / data_rate;
             min_time_span_s = std::max(sample_period_s, 64.0 * sample_period_s);
-            if (app.ring_capacity_samples > 0) {
-                max_time_span_s = 0.95 * (static_cast<double>(app.ring_capacity_samples) / data_rate);
-            } else {
-                max_time_span_s = 100e-3;
-            }
             max_time_span_s = std::max(max_time_span_s, min_time_span_s);
-            visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
-            app.dec_engine->set_visible_time_span(visible_time_span_s);
+            double clamped = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
+            if (clamped != visible_time_span_s) {
+                visible_time_span_s = clamped;
+                app.viz_stage->set_visible_time_span(visible_time_span_s);
+            }
         }
 
-        // Window coverage: raw_samples / expected_samples_per_frame
-        double window_coverage = 0.0;
-        {
-            double expected = data_rate * visible_time_span_s * static_cast<double>(app.num_channels);
-            window_coverage = (expected > 0.0) ? (static_cast<double>(dec_output.raw_sample_count) / expected) : 0.0;
-            window_coverage = std::clamp(window_coverage, 0.0, 1.0);
-        }
+        // Window coverage from visualization stage
+        double window_coverage = app.viz_stage->window_coverage();
 
         auto telemetry = app.benchmark->snapshot();
         app.hud->build_status_bar(telemetry,
                                   paused,
-                                  dec_metrics.effective_algorithm,
+                                  effective_algo,
                                   app.num_channels,
-                                  total_drops,
+                                  queue_drops,
                                   sg_drops,
-                                  seq_gaps,
                                   window_coverage,
                                   visible_time_span_s,
                                   min_time_span_s,
@@ -293,15 +378,12 @@ void run_main_loop(AppComponents& app) {
                 visible_time_span_s *= 0.5;
             }
             visible_time_span_s = std::clamp(visible_time_span_s, min_time_span_s, max_time_span_s);
-            app.dec_engine->set_visible_time_span(visible_time_span_s);
+            app.viz_stage->set_visible_time_span(visible_time_span_s);
             spdlog::info("Visible time span -> {:.3f} ms (range {:.3f}..{:.3f} ms)",
                          visible_time_span_s * 1e3,
                          min_time_span_s * 1e3,
                          max_time_span_s * 1e3);
         }
-
-        // Read producer timestamp before render
-        uint64_t producer_ts = app.ingestion ? app.ingestion->last_producer_ts_ns() : 0;
 
         // Render (timed)
         t0 = Benchmark::now();
@@ -317,15 +399,6 @@ void run_main_loop(AppComponents& app) {
             &draw_region, [&](VkCommandBuffer cmd) { app.hud->render(cmd); });
         app.benchmark->set_render_time(Benchmark::elapsed_ms(t0));
 
-        // E2E latency: producer_ts -> render completion
-        double e2e_ms = 0.0;
-        if (producer_ts > 0) {
-            auto now_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    Benchmark::Clock::now().time_since_epoch()).count());
-            e2e_ms = static_cast<double>(now_ns - producer_ts) / 1e6;
-        }
-        app.benchmark->set_e2e_latency(e2e_ms);
         if (!ok) {
             // Swapchain out of date — recreate
             int w, h;
@@ -342,17 +415,34 @@ void run_main_loop(AppComponents& app) {
 
         // Profile mode: collect metrics and manage scenario transitions
         if (app.enable_profile) {
+            // Use pipeline frame (single MinMax) for envelope verification,
+            // not display frame (double-decimated by viz_stage)
+            const bool has_pipeline = last_pipeline_frame.samples_per_channel > 0;
+            const int16_t* prof_data = has_pipeline ? last_pipeline_frame.data() : nullptr;
+            uint32_t prof_per_ch_vtx = has_pipeline ? last_pipeline_frame.samples_per_channel : 0;
+
+            // Compute per-channel raw sample count from rate ratio
+            // raw_spc = original_rate / decimated_rate * decimated_spc
+            std::vector<uint32_t> per_ch_raw_vec;
+            if (has_pipeline && last_pipeline_frame.sample_rate_hz > 0.0 && data_rate > 0.0) {
+                uint32_t raw_spc = static_cast<uint32_t>(
+                    std::round(data_rate / last_pipeline_frame.sample_rate_hz
+                               * last_pipeline_frame.samples_per_channel));
+                per_ch_raw_vec.assign(app.num_channels, raw_spc);
+            }
+
+            uint32_t prof_raw_total = per_ch_raw_vec.empty() ? raw_sample_count
+                : static_cast<uint32_t>(per_ch_raw_vec[0]) * app.num_channels;
+
             app.profiler->on_frame(*app.benchmark, app.render_backend->vertex_count(),
                                    data_rate,
-                                   dec_metrics.ring_fill_ratio,
-                                   total_drops, sg_drops,
-                                   seq_gaps, dec_output.raw_sample_count,
-                                   e2e_ms,
+                                   queue_drops, sg_drops,
+                                   prof_raw_total,
                                    *app.cmd_queue,
-                                   dec_output.data.empty() ? nullptr : dec_output.data.data(),
-                                   dec_output.per_channel_vertex_count,
-                                   dec_metrics.effective_algorithm,
-                                   dec_output.per_channel_raw_counts.empty() ? nullptr : &dec_output.per_channel_raw_counts);
+                                   prof_data,
+                                   prof_per_ch_vtx,
+                                   effective_algo,
+                                   per_ch_raw_vec.empty() ? nullptr : &per_ch_raw_vec);
         }
 
         // Update window title with FPS (throttled to 4 Hz)
@@ -363,7 +453,7 @@ void run_main_loop(AppComponents& app) {
                           "Grebe | FPS: %.1f | Frame: %.2f ms | %uch | %s%s",
                           telemetry.fps, telemetry.frame_time_ms,
                           app.num_channels,
-                          grebe::DecimationEngine::algorithm_name(dec_metrics.effective_algorithm),
+                          decimation_mode_name(app.dec_stage ? app.dec_stage->effective_mode() : DecimationMode::MinMax),
                           app.transport_source ? " | IPC" : "");
             glfwSetWindowTitle(app.window, title);
             last_title_update = now;

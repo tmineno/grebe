@@ -32,8 +32,6 @@ public:
     void set_decimation_time(double ms);
     void set_decimation_ratio(double ratio);
     void set_data_rate(double samples_per_sec);
-    void set_ring_fill(double ratio);
-    void set_e2e_latency(double ms);
 
     double drain_time_avg()  const { return drain_avg_; }
     double upload_time_avg() const { return upload_avg_; }
@@ -43,7 +41,6 @@ public:
     double vertex_count_avg()      const { return vtx_avg_; }
     double decimation_time_avg()   const { return decimate_avg_; }
     double decimation_ratio()      const { return decimate_ratio_; }
-    double e2e_latency_avg()       const { return e2e_avg_; }
 
     // Produce a public telemetry snapshot (rolling averages)
     grebe::TelemetrySnapshot snapshot() const;
@@ -90,7 +87,6 @@ private:
     RollingAvg samples_rolling_{};
     RollingAvg vtx_rolling_{};
     RollingAvg decimate_rolling_{};
-    RollingAvg e2e_rolling_{};
 
     double drain_avg_  = 0.0;
     double upload_avg_ = 0.0;
@@ -100,7 +96,6 @@ private:
     double vtx_avg_       = 0.0;
     double decimate_avg_  = 0.0;
     double decimate_ratio_ = 1.0;
-    double e2e_avg_       = 0.0;
 
     // Raw per-frame values (for logging)
     double drain_raw_   = 0.0;
@@ -112,8 +107,6 @@ private:
     double decimate_raw_    = 0.0;
     double decimate_ratio_raw_ = 1.0;
     double data_rate_   = 0.0;
-    double ring_fill_   = 0.0;
-    double e2e_raw_     = 0.0;
 
     // CSV log
     std::ofstream log_file_;

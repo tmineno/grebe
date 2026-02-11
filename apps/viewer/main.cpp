@@ -1,13 +1,15 @@
 #include "app_command.h"
 #include "app_loop.h"
 #include "cli.h"
-#include "drop_counter.h"
 #include "vulkan_renderer.h"
 #include "synthetic_source.h"
 #include "transport_source.h"
-#include "ingestion_thread.h"
-#include "ring_buffer.h"
 #include "grebe/config.h"
+#include "grebe/runtime.h"
+#include "grebe/queue.h"
+#include "stages/data_source_adapter.h"
+#include "stages/decimation_stage.h"
+#include "stages/visualization_stage.h"
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
@@ -117,28 +119,6 @@ int main(int argc, char* argv[]) {
                  vk_renderer.render_pass(), vk_renderer.image_count());
 
         // =====================================================================
-        // Streaming pipeline: ring buffers (used by both modes)
-        // =====================================================================
-        std::vector<std::unique_ptr<RingBuffer<int16_t>>> ring_buffers;
-        std::vector<RingBuffer<int16_t>*> ring_ptrs;
-        for (uint32_t ch = 0; ch < pipeline_config.channel_count; ch++) {
-            ring_buffers.push_back(
-                std::make_unique<RingBuffer<int16_t>>(pipeline_config.ring_buffer_size + 1));
-            ring_ptrs.push_back(ring_buffers.back().get());
-        }
-        spdlog::info("Ring buffers: {}ch x {} samples ({} MB each)",
-                     pipeline_config.channel_count, pipeline_config.ring_buffer_size,
-                     pipeline_config.ring_buffer_size * 2 / (1024 * 1024));
-
-        // Per-channel drop counters
-        std::vector<std::unique_ptr<DropCounter>> drop_counters;
-        std::vector<DropCounter*> drop_ptrs;
-        for (uint32_t ch = 0; ch < pipeline_config.channel_count; ch++) {
-            drop_counters.push_back(std::make_unique<DropCounter>());
-            drop_ptrs.push_back(drop_counters.back().get());
-        }
-
-        // =====================================================================
         // Data source: SyntheticSource / TransportSource (pipe or UDP)
         // =====================================================================
         std::unique_ptr<SyntheticSource> synthetic_source;
@@ -146,7 +126,6 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<ProcessHandle> sg_process;
         std::unique_ptr<PipeConsumer> pipe_consumer;
         std::unique_ptr<UdpConsumer> udp_consumer;
-        IngestionThread ingestion;
 
         if (opts.udp_port > 0) {
             // UDP mode: receive from external grebe-sg, no subprocess
@@ -159,8 +138,7 @@ int main(int argc, char* argv[]) {
             synthetic_source = std::make_unique<SyntheticSource>(
                 pipeline_config.channel_count, 1'000'000.0, WaveformType::Sine);
             synthetic_source->start();
-            ingestion.start(*synthetic_source, ring_ptrs, drop_ptrs);
-            spdlog::info("Embedded mode: SyntheticSource + IngestionThread");
+            spdlog::info("Embedded mode: SyntheticSource");
         } else {
             std::string sg_path = find_sg_binary(argv[0]);
             std::vector<std::string> sg_args;
@@ -187,14 +165,31 @@ int main(int argc, char* argv[]) {
         }
 
         // =====================================================================
-        // Decimation engine (reads from ring buffers, same for both modes)
+        // Stage pipeline: DataSourceAdapter → DecimationStage
         // =====================================================================
-        grebe::DecimationEngine dec_engine;
-        dec_engine.start(ring_ptrs, pipeline_config.decimation);
+        grebe::IDataSource* data_source = synthetic_source
+            ? static_cast<grebe::IDataSource*>(synthetic_source.get())
+            : static_cast<grebe::IDataSource*>(transport_source.get());
 
-        spdlog::info("Streaming started: {}ch, 1 MSPS, decimation={}",
-                     pipeline_config.channel_count,
-                     grebe::DecimationEngine::algorithm_name(pipeline_config.decimation.algorithm));
+        auto adapter = std::make_unique<grebe::DataSourceAdapter>(*data_source);
+        auto dec_stage = std::make_unique<grebe::DecimationStage>(
+            DecimationMode::MinMax,
+            pipeline_config.decimation.target_points);
+        dec_stage->set_sample_rate(pipeline_config.decimation.sample_rate);
+
+        // Keep raw pointer for runtime control
+        auto* dec_stage_ptr = dec_stage.get();
+
+        grebe::LinearRuntime runtime;
+        runtime.add_stage(std::move(adapter));
+        runtime.add_stage(std::move(dec_stage), 512, grebe::BackpressurePolicy::DropOldest);
+        runtime.start();
+
+        spdlog::info("Pipeline started: {}ch, 1 MSPS, decimation=MinMax (LinearRuntime)",
+                     pipeline_config.channel_count);
+
+        // Visualization stage (main-thread, not in pipeline)
+        grebe::VisualizationStage viz_stage(pipeline_config.decimation.target_points);
 
         ProfileRunner profiler;
         profiler.set_channel_count(pipeline_config.channel_count);
@@ -211,11 +206,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Start IPC ingestion after dec_engine is ready
-        if (transport_source) {
-            ingestion.start(*transport_source, ring_ptrs, drop_ptrs);
-        }
-
         // =====================================================================
         // Assemble AppComponents and run main loop
         // =====================================================================
@@ -227,13 +217,12 @@ int main(int argc, char* argv[]) {
         app.hud = &hud;
         app.synthetic_source = synthetic_source.get();
         app.transport_source = transport_source.get();
-        app.ingestion = &ingestion;
-        app.dec_engine = &dec_engine;
+        app.runtime = &runtime;
+        app.dec_stage = dec_stage_ptr;
+        app.viz_stage = &viz_stage;
         app.benchmark = &benchmark;
         app.profiler = &profiler;
-        app.drop_counters = drop_ptrs;
         app.num_channels = pipeline_config.channel_count;
-        app.ring_capacity_samples = pipeline_config.ring_buffer_size;
         app.enable_profile = opts.enable_profile;
         app.current_sample_rate.store(1e6, std::memory_order_relaxed);
         app.current_paused.store(false, std::memory_order_relaxed);
@@ -243,20 +232,18 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         // Cleanup
         // =====================================================================
+        runtime.stop();
         benchmark.stop_logging();
 
         if (synthetic_source) {
             synthetic_source->stop();
-            ingestion.stop();
         } else if (transport_source) {
             // Close transport to unblock any blocking receive_frame()
             if (udp_consumer) udp_consumer->close();
             if (pipe_consumer) pipe_consumer.reset();
-            ingestion.stop();
             transport_source->stop();
         }
 
-        dec_engine.stop();
         sg_process.reset();
 
         int exit_code = 0;

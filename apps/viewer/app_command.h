@@ -10,13 +10,15 @@ struct CmdCycleDecimationMode {};
 struct CmdTogglePaused {};
 struct CmdToggleVsync {};
 struct CmdQuit {};
+struct CmdDebugDump {};
 
 using AppCommand = std::variant<
     CmdSetSampleRate,
     CmdCycleDecimationMode,
     CmdTogglePaused,
     CmdToggleVsync,
-    CmdQuit
+    CmdQuit,
+    CmdDebugDump
 >;
 
 class AppCommandQueue {
