@@ -429,7 +429,7 @@ VisualizationStage NFR は別プロファイルで評価すること。
 | `libgrebe` | `Current` | Stage 実行基盤の中核 |
 | `grebe-viewer` | `Current` | Visualization 側参照実装 |
 | `grebe-sg` | `Current` | Source/Transport 側参照実装 |
-| `grebe-bench` | `Planned` | SharedMemory システム NFR + SourceStage 入力 NFR + VisualizationStage NFR 検証基盤 |
+| `grebe-bench` | `Current` / `Target` | マイクロベンチ基盤は `Current`（BM-A/B/C/E/F/H）。SharedMemory システム NFR + SourceStage 入力 NFR + VisualizationStage NFR 検証スコープは `Target` |
 
 ### 8.2 ドキュメント
 

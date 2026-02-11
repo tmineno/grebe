@@ -110,10 +110,10 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 - [Current] WSL2 loopback は datagram サイズ制約が厳しい
 - [Current] Windows native では大きい datagram が有効
-- [Target] scatter-gather I/O (sendmsg/WSASendTo) により送信側 memcpy を削減
-- [Planned] sendmmsg/recvmmsg 相当のバッチI/Oで syscall overhead を低減
+- [Current] scatter-gather I/O (sendmsg/WSASendTo) により送信側 memcpy を削減
+- [Current] sendmmsg/recvmmsg バッチ I/O (Linux) で syscall overhead を低減
 
-### 3.5 SharedMemory Transport
+### 3.5 SharedMemory Transport [Target]
 
 用途: 同一マシン高帯域、マルチコンシューマ。
 方式: 共有メモリ領域上の **コンシューマ別独立 Queue** を介してプロセス間通信。
