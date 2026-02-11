@@ -1,9 +1,9 @@
 # Grebe — Integration Guide
 
-**Version:** 1.0.0  
+**Version:** 2.0.0
 **Last Updated:** 2026-02-11
 
-このドキュメントは、`doc/RDD.md` の要件を実装に落とし込むための統合ガイドである。  
+このドキュメントは、`doc/RDD.md` (v3.1.0) の要件を実装に落とし込むための統合ガイドである。
 RDD が「契約レベル」を扱うのに対し、本書は「実装パターン」を扱う。
 
 ---
@@ -12,10 +12,12 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 対象:
 
-- DataSource 実装の統合
-- Transport (Pipe/UDP) の統合
+- Stage 実装の統合パターン
+- Transport (Pipe/UDP/SharedMemory) の統合
+- 共有メモリ Queue の設計指針
+- Frame 所有権モデル（Owned/Borrowed）の使い分け
+- Fan-out 構成パターン
 - OS/デバイス別 I/O メカニズムの選定
-- バッファ所有権、通知モデル、フレーミングの設計指針
 
 非対象:
 
@@ -25,20 +27,18 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 ## 2. Core Contracts
 
-### 2.1 IDataSource
+### 2.1 Stage 契約
 
-`IDataSource` はデバイス固有 I/O を隠蔽し、libgrebe へ `FrameBuffer` を供給する。
+`IStage::process()` は BatchView を受け取り、BatchWriter に結果を書き出す。
 
 最小契約:
 
-- `info()` は `channel_count`, `sample_rate_hz`, `is_realtime` を返す
-- `read_frame()` は channel-major の `int16_t` 配列を返す
-- `start()/stop()` は再入可能かつ例外安全に実装する
+- EOS / Retry / Error を戻り値で明示する
+- stop 要求に対して bounded time で停止する
+- Borrowed Frame を受け取った場合、処理完了後に release するか Owned に変換する
 
-実装時の注意:
-
-- フレーム欠落時は `sequence` と drop counter で観測可能にする
-- 高レート経路では固定長バッファを事前確保し、再確保を避ける
+既存の `IDataSource` 実装は SourceStage アダプタ経由で Stage グラフに接続する。
+`SyntheticSource`, `TransportSource` はそのまま SourceStage として利用可能。
 
 ### 2.2 Frame Protocol
 
@@ -48,41 +48,127 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 - `payload_bytes = channel_count * block_length_samples * sizeof(int16_t)`
 - viewer 側で `TransportSource` が `FrameBuffer` に変換
 
+### 2.3 Frame 所有権モデル
+
+| モデル | 生成タイミング | 解放責務 |
+|---|---|---|
+| Owned | Pipe/UDP 受信時のコピー、SyntheticSource 生成 | Frame デストラクタ（通常の RAII） |
+| Borrowed | SharedMemory 読み取り、DMA バッファ参照 | 明示的 release（プロデューサに返却） |
+
+使い分けの指針:
+
+- **Owned を使う場合**: プロセス間コピーが不可避な経路（Pipe, UDP）、
+  または Stage が出力データを変異させる場合
+- **Borrowed を使う場合**: 共有メモリ上のデータを読み取り専用で参照する経路。
+  Stage 内でデータを変更する必要がある場合は Owned に変換してから処理する
+
 ---
 
 ## 3. Built-in Integration Patterns
 
 ### 3.1 SyntheticSource (libgrebe)
 
-用途: テスト、デモ、ベンチマーク。  
+用途: テスト、デモ、ベンチマーク。
 方式: period tiling または LUT で `FrameBuffer` を生成して返却。
+所有権: Owned（生成時にバッファを確保）。
 
 ### 3.2 FileReader (grebe-sg)
 
-用途: GRB ファイル再生。  
+用途: GRB ファイル再生。
 方式: `mmap` ベースで読み取り、ペーシングしつつ sender thread へ供給。
+所有権: Owned（mmap 領域から RingBuffer にコピー）。
 
 ### 3.3 Pipe Transport
 
-用途: ローカル標準運用。  
+用途: ローカル標準運用。
 方式: `grebe-sg` を viewer が subprocess として起動し、stdout/stdin パイプで送受信。
+所有権: Owned（recvfrom / read で受信バッファにコピー）。
 
 ### 3.4 UDP Transport
 
-用途: 独立プロセス運用、ネットワーク越し運用。  
+用途: 独立プロセス運用、ネットワーク越し運用。
 方式: `UdpProducer`/`UdpConsumer` による datagram 伝送。
+所有権: Owned（recvfrom / recvmmsg で受信バッファにコピー）。
 
 実装メモ:
 
+- scatter-gather I/O (sendmsg/WSASendTo) で送信側 memcpy を削減済み
+- sendmmsg/recvmmsg バッチ化で syscall overhead を削減済み (Phase 9.2)
 - WSL2 loopback は datagram サイズ制約が厳しい
 - Windows native では大きい datagram が有効
-- 高帯域化は `doc/TODO.md` Phase 9.2 を参照
+
+### 3.5 SharedMemory Transport
+
+用途: 同一マシン高帯域、マルチコンシューマ。
+方式: 共有メモリ領域上の Queue を介してプロセス間通信。
+所有権: **Borrowed**（コンシューマは shm 上のデータを直接参照、release で返却）。
+
+構成パターン:
+
+```
+Producer process:
+  SourceStage → ShmWriter
+    - 共有メモリ領域にフレームデータを書き込み
+    - write index を atomic に更新
+    - コンシューマの release を待って領域を再利用
+
+Consumer process(es):
+  ShmReader → ProcessingStage → ...
+    - read index を atomic に追跡
+    - Borrowed Frame として下流に渡す
+    - 処理完了後に release（read index を進める）
+```
+
+設計指針:
+
+- 共有メモリ領域のサイズは初期化時に固定する（定常状態で確保しない）
+- プロデューサ・コンシューマ間の同期は atomic 操作のみで行う
+- コンシューマの crash を heartbeat またはタイムアウトで検知する
+- 複数コンシューマは各自独立した read index を持つ（fan-out）
 
 ---
 
-## 4. Device-Specific Source Patterns
+## 4. Fan-Out Patterns
 
-### 4.1 High-Bandwidth NIC (Linux)
+### 4.1 概要
+
+一つの Stage 出力を複数の下流 Stage に同時配信するパターン。
+RDD FR-11 の実装指針。
+
+```
+                    ┌─ [Queue A] → Decimation → Visualization
+Source → [Queue] ──┤
+                    ├─ [Queue B] → FFTStage → SpectrumView
+                    │
+                    └─ [Queue C] → Recorder
+```
+
+### 4.2 In-Process Fan-Out
+
+同一プロセス内で Runtime が出力 Frame を各 Queue にコピー（Owned）またはクローン。
+
+指針:
+
+- 各 Queue に独立した backpressure policy を設定する
+- 遅い消費者が速い消費者をブロックしない（独立性保証）
+- 遅い消費者には `drop_oldest` policy を推奨
+
+### 4.3 SharedMemory Fan-Out
+
+共有メモリ上の Queue で複数コンシューマプロセスが同一データを参照。
+
+指針:
+
+- プロデューサは 1 回だけ書き込み、各コンシューマが独立 read index で追跡
+- 領域の再利用は全コンシューマの release 完了後（最遅コンシューマに依存）
+- 遅延コンシューマの切り離し: タイムアウト超過で該当 index を無効化し、
+  プロデューサの書き込みをブロックしない
+
+---
+
+## 5. Device-Specific Source Patterns
+
+### 5.1 High-Bandwidth NIC (Linux)
 
 候補:
 
@@ -92,10 +178,11 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 設計指針:
 
 - NIC キューとスレッドを 1:1 に近づける
-- 受信バーストをフレーム境界に再構成して `FrameBuffer` 化
+- 受信バーストをフレーム境界に再構成して SourceStage 出力とする
 - backpressure 時は drop policy を明示する
+- SharedMemory 経路: NIC → SourceStage → ShmWriter で他プロセスに配信
 
-### 4.2 PCIe FPGA/ADC (Linux)
+### 5.2 PCIe FPGA/ADC (Linux)
 
 候補:
 
@@ -105,9 +192,10 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 - DMA バッファと IOMMU マッピングを初期化時に確定
 - 完了通知は eventfd または polling
-- v1.0 はコピー経路、将来は borrow/release 経路を検討
+- Borrowed Frame で DMA バッファを直接参照可能
+  （Stage 内で変更が必要な場合は Owned に変換）
 
-### 4.3 USB Measurement Devices
+### 5.3 USB Measurement Devices
 
 候補:
 
@@ -119,7 +207,7 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 - callback で受信したパケットをフレーム境界で結合
 - ホスト側で再同期可能な sequence を持たせる
 
-### 4.4 File Playback
+### 5.4 File Playback
 
 候補:
 
@@ -133,7 +221,7 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 
 ---
 
-## 5. OS Mechanism Matrix
+## 6. OS Mechanism Matrix
 
 | Mechanism | OS | Main Use | Zero-Copy | Kernel Bypass |
 |---|---|---|---|---|
@@ -144,26 +232,70 @@ RDD が「契約レベル」を扱うのに対し、本書は「実装パター�
 | io_uring | Linux | File/NIC | Partial-Yes | Partial |
 | mmap | Cross-platform | File | Yes | N/A |
 | IOCP | Windows | Socket/File | Partial | No |
+| POSIX shm (shm_open) | Linux/macOS | SharedMemory Queue | Yes | N/A |
+| Windows shared memory | Windows | SharedMemory Queue | Yes | N/A |
 
 ---
 
-## 6. Buffer Ownership / Notification / Framing
+## 7. Buffer Ownership / Notification / Framing
 
-| Axis | DPDK (NIC) | libusb (USB) | VFIO DMA | mmap (File) |
-|---|---|---|---|---|
-| Buffer ownership | mempool | user-managed | user + IOMMU | page cache |
-| Notification | polling | callback/blocking | eventfd/polling | synchronous/fault |
-| Framing unit | packet | transfer | device-defined | byte stream |
+| Axis | DPDK (NIC) | libusb (USB) | VFIO DMA | mmap (File) | SharedMemory |
+|---|---|---|---|---|---|
+| Buffer ownership | mempool | user-managed | user + IOMMU | page cache | shm region (固定長) |
+| Notification | polling | callback/blocking | eventfd/polling | synchronous/fault | atomic + futex/polling |
+| Framing unit | packet | transfer | device-defined | byte stream | Frame 契約準拠 |
+| Frame 所有権 | Owned (コピー後) | Owned | Borrowed | Owned (コピー後) | Borrowed |
 
 ---
 
-## 7. Practical Checklist
+## 8. Fault Isolation Patterns
 
-新しい IDataSource を追加する際のチェック項目:
+### 8.1 コンシューマ crash
 
-- 1. `DataSourceInfo` の定義（ch/rate/realtime）
-- 2. フレーミング規約（channel-major, payload bytes）
-- 3. drop 計測（source 側 + viewer 側）
-- 4. 停止シーケンス（`stop()` で確実に unblock）
-- 5. モード別 NFR に対する測定項目を `grebe-bench` に追加
+- プロデューサは各コンシューマの heartbeat（最終 read timestamp）を監視する
+- タイムアウト（NFR-06: 1 秒）を超過したコンシューマの Queue を切り離す
+- 切り離し後、プロデューサは該当領域を再利用可能にする
+- 残りのコンシューマは影響を受けない
 
+### 8.2 プロデューサ crash
+
+- コンシューマは write index の停止 + heartbeat 不在を検知する
+- EOS として扱い、graceful に停止する
+- 共有メモリ領域のクリーンアップはプロセス終了時に OS が回収、
+  または明示的な unlink で解放
+
+### 8.3 共有メモリの一貫性
+
+- ヘッダ（sequence, channel_count 等）は atomic 書き込みまたは seqlock で保護
+- payload は write index 更新前に書き込み完了を保証（memory fence）
+- コンシューマは read 時に sequence の整合性を検証する
+
+---
+
+## 9. Practical Checklist
+
+### 9.1 新しい Stage を追加する場合
+
+1. `IStage::process()` を実装（BatchView → BatchWriter）
+2. Borrowed Frame を受け取る可能性がある場合、release パスを実装
+3. stop 要求で bounded time に停止することを確認
+4. Stage 単位の telemetry（throughput, latency, drops）を公開
+5. `grebe-bench` に性能測定シナリオを追加
+
+### 9.2 新しい SourceStage（デバイス統合）を追加する場合
+
+1. `IDataSource` を実装、または直接 `IStage` を実装
+2. `DataSourceInfo` の定義（ch/rate/realtime）
+3. フレーミング規約（channel-major, payload bytes）
+4. drop 計測（source 側 + viewer 側）
+5. 停止シーケンス（`stop()` で確実に unblock）
+6. 所有権モデルの決定（Owned: コピー経路 / Borrowed: ゼロコピー経路）
+
+### 9.3 SharedMemory 経路を追加する場合
+
+1. 共有メモリ領域のサイズを算出（チャネル数 × ブロックサイズ × スロット数）
+2. プロデューサ/コンシューマの同期方式を選定（atomic + polling / futex）
+3. Borrowed Frame の release パスを全下流 Stage で実装
+4. コンシューマ crash 時の切り離しタイムアウトを設定
+5. Fan-out コンシューマ数の上限を決定（read index の管理コスト）
+6. NFR-04 (ゼロコピー効率) の測定項目を `grebe-bench` に追加
