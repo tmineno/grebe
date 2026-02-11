@@ -1,7 +1,7 @@
 # Grebe — Vulkan 高速時系列ストリーム描画 PoC/MVP 要件定義書
 
-**バージョン:** 1.6.1
-**最終更新:** 2026-02-08
+**バージョン:** 1.6.2
+**最終更新:** 2026-02-09
 
 ---
 
@@ -33,6 +33,9 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 - `grebe` から `grebe-sg` の子プロセス自動起動 + `--embedded` in-process モード
 - SG 専用 UI（レート / 波形 / ブロック長 / Pause）と Main 可視化 UI の責務分離
 - 波形表示整合性検証（envelope 100%、sequence continuity、window coverage）
+- IPC モード envelope 検証（IPC ≤100 MSPS 100%、4ch×1G 99.2%）
+- E2E レイテンシ計測（全レート NFR-02 PASS、worst p99=18.1ms）
+- Main 可視化 UI 改善（波形軸表示、可視 time span 設定、SG 周波数設定）
 
 **本PoCに含まないもの:**
 - 実デバイス（ADC/FPGA）との接続
@@ -43,9 +46,7 @@ Vulkan を用いた時系列データストリームの高速描画パイプラ�
 **延期・将来マイルストーン:**
 - Shared Memory IPC（TI-08 で延期判定。pipe transport で PoC 要件充足）
 - `--attach-sg` attach モード（既存 `grebe-sg` への接続。現在は spawn + `--embedded` のみ）
-- Main 可視化 UI 改善（波形軸表示 + 可視 time span 設定 — Phase 11e scope）
 - Trigger 機構（internal/external/timer — Phase 15+ scope）
-- E2E レイテンシ定量計測（Phase 12 scope）
 
 ---
 
@@ -426,7 +427,7 @@ struct ConsumerStatusBlockV2 {
 - **FR-10.7:** 信頼性プロファイルは loss-tolerant realtime とし、SG 側 drops を計測・記録する
 - **FR-10.8:** `FrameHeaderV2.header_crc32c` 検証 — **Phase 13 scope** (現在プレースホルダ)
 - **FR-10.9:** transport 指標計測（drop rate, samples/frame, SG drops）。inflight depth/credits は **延期** (shm scope)
-- **FR-10.10:** E2E timestamp delta — **Phase 12 scope**
+- **FR-10.10:** E2E timestamp delta — **実装済み** (Phase 12)
 - **FR-10.11:** config 更新は `IpcCommand` 経由のみ許可する
 - **FR-10.12:** trigger/capture 境界メタデータ — **Phase 15+ scope**
 
@@ -536,6 +537,7 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | TI-08 | IPC ボトルネック再評価 | ボトルネックは pipe ではなくパイプライン (cache cold + ring drain)。マルチスレッド間引きで 0-drops 達成 |
 | TI-09 | SG-side drop 評価 | IPC 4ch×1G で SG drops ~37%。可視化品質に影響なし (MinMax 3840 vtx/ch 不変)。**PoC 許容** |
 | TI-10 | 波形表示整合性検証 | Embedded 全レート envelope 100%。lazy-caching verifier で高レート対応。**検証完了** |
+| TI-11 | E2E レイテンシ計測 | 全レート NFR-02 PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms)。**検証完了** |
 
 ---
 
@@ -591,7 +593,7 @@ PoCを通じて以下の技術的疑問に回答を得た。詳細は `doc/techn
 | プロファイルレポート | JSON | 4シナリオの自動計測結果 |
 | マイクロベンチマーク結果 | JSON | BM-A/B/C/E の計測値 |
 | テレメトリログ | CSV | フレーム単位の詳細計測値 |
-| 技術的判断メモ | Markdown | TI-01〜10 への回答と推奨事項 |
+| 技術的判断メモ | Markdown | TI-01〜11 への回答と推奨事項 |
 
 ---
 

@@ -129,6 +129,18 @@
 - [x] TI-11 に計測結果と分析を記録
 - [x] 受入条件: 全レート NFR-02 PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms)
 
+### Phase 11e: Main Viewer UI 改善（Waveform Axis + Time Span）
+
+- [x] Main UI に time span 設定（up/down arrow）を追加
+- [x] Main UI の draw field 右側に config pane を設置し、time span 設定を配置
+- [x] DecimationThread を latest history window 化し、time span > 10ms の表示長反映を修正
+- [x] RingBuffer discard API 追加（古いサンプルの効率破棄）
+- [x] HUD に amplitude/time 軸と raw int16 ラベルを追加
+- [x] 波形描画を軸内にクリップ（viewport/scissor）
+- [x] time span 上限/下限を sample rate / ring capacity から動的導出
+- [x] SG UI に periodic waveform 周波数（Hz）設定フィールドを追加
+- [x] TI-10 に挙動差分を追記（Phase 11e）
+
 ---
 
 ## PoC 達成状況サマリ
@@ -136,13 +148,14 @@
 | PoC 目的 | ステータス | 根拠 |
 |---|---|---|
 | 1 GSPS リアルタイム描画 | **達成** | L0-L3 全 PASS (L3=2,022 FPS) |
-| パイプライン各段の定量計測 | **達成** | TI-01~10, BM-A/B/C/E |
+| パイプライン各段の定量計測 | **達成** | TI-01~11, BM-A/B/C/E |
 | ボトルネック特定・解消 | **達成** | CPU 間引き律速 → マルチスレッドで 0-drops |
 | マルチチャンネル (4ch/8ch) | **達成** | 8ch×1G PASS, 0-drops (Embedded) |
 | プロセス分離 IPC | **達成** | pipe IPC + embedded 両モード動作 |
 | 波形表示整合性 (NFR-02b) | **達成** | TI-10: Embedded 1ch/4ch × 全レートで envelope 100% |
 | 波形整合性 高精度計測 | **達成** | Phase 11c: lazy-caching で全シナリオ envelope 100% (R-16 完了)。Phase 11d: IPC ≤100 MSPS 100%, 4ch×1G 99.2% (R-17 完了) |
 | E2E レイテンシ (NFR-02) | **達成** | TI-11: 全レート PASS (worst p99=18.1ms, L1≤50ms/L2≤100ms) |
+| Main UI 改善 (Phase 11e) | **達成** | 波形軸表示、time span 設定、SG 周波数設定 |
 
 ### Phase 11: 波形表示整合性検証（NFR-02b）
 
@@ -209,17 +222,6 @@ Phase 11b で build-once 最適化（verifier テーブルを初回フレーム�
 
 ## 次期マイルストーン候補（優先度順）
 
-### Phase 11e: Main Viewer UI 改善（Waveform Axis + Time Span）[完了]
-
-- [x] Main UI に time span 設定（up/down arrow）を追加
-- [x] Main UI の draw field 右側に config pane を設置し、time span 設定を配置
-- [x] DecimationThread を latest history window 化し、time span > 10ms の表示長反映を修正
-- [x] RingBuffer discard API 追加（古いサンプルの効率破棄）
-- [x] HUD に amplitude/time 軸と raw int16 ラベルを追加
-- [x] 波形描画を軸内にクリップ（viewport/scissor）
-- [x] time span 上限/下限を sample rate / ring capacity から動的導出
-- [x] SG UI に periodic waveform 周波数（Hz）設定フィールドを追加
-- [x] TI-10 に挙動差分を追記（Phase 11e）
 ### Phase 13.5: 回帰検証マトリクス
 
 **目標:** Phase 間の回帰を防止する標準化された検証スイートを定義・運用する。
