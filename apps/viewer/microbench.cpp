@@ -203,7 +203,8 @@ struct DrawResult {
 
 static DrawResult bench_draw(VulkanContext& ctx, Swapchain& swapchain,
                              BufferManager& buf_mgr, Renderer& renderer,
-                             uint32_t vertex_count, int num_frames) {
+                             uint32_t vertex_count, int num_frames,
+                             Renderer::OverlayCallback overlay_cb = {}) {
     // Generate fixed test data
     std::vector<int16_t> test_data(vertex_count);
     for (uint32_t i = 0; i < vertex_count; i++) {
@@ -220,12 +221,12 @@ static DrawResult bench_draw(VulkanContext& ctx, Swapchain& swapchain,
 
     // Warmup
     for (int i = 0; i < 30; i++) {
-        renderer.draw_frame(ctx, swapchain, buf_mgr, pc);
+        renderer.draw_frame(ctx, swapchain, buf_mgr, pc, overlay_cb);
     }
 
     auto t0 = Clock::now();
     for (int i = 0; i < num_frames; i++) {
-        renderer.draw_frame(ctx, swapchain, buf_mgr, pc);
+        renderer.draw_frame(ctx, swapchain, buf_mgr, pc, overlay_cb);
     }
     vkDeviceWaitIdle(ctx.device());
     auto t1 = Clock::now();
@@ -406,6 +407,34 @@ int run_microbenchmarks(VulkanContext& ctx, Swapchain& swapchain,
         bme.push_back({{"error", e.what()}});
     }
     report["bm_e_compute"] = bme;
+
+    // --- BM-F: Overlay Callback Overhead (R-3) ---
+    spdlog::info("[BM-F] Overlay Callback Overhead (R-3)");
+    nlohmann::json bmf = nlohmann::json::object();
+    {
+        constexpr uint32_t vtx = 3840;
+        constexpr int frames = 500;
+
+        // Baseline: empty callback (default {})
+        auto r_no_cb = bench_draw(ctx, swapchain, buf_mgr, renderer, vtx, frames);
+
+        // With no-op callback
+        auto r_noop_cb = bench_draw(ctx, swapchain, buf_mgr, renderer, vtx, frames,
+                                     [](VkCommandBuffer) {});
+
+        double delta_ms = r_noop_cb.avg_frame_ms - r_no_cb.avg_frame_ms;
+        spdlog::info("  No callback:   {:.0f} FPS, {:.3f} ms/frame", r_no_cb.fps, r_no_cb.avg_frame_ms);
+        spdlog::info("  No-op callback: {:.0f} FPS, {:.3f} ms/frame", r_noop_cb.fps, r_noop_cb.avg_frame_ms);
+        spdlog::info("  Delta: {:.4f} ms/frame (threshold: 0.1 ms)", delta_ms);
+
+        bmf = {
+            {"vertex_count", vtx}, {"frames", frames},
+            {"no_callback_fps", r_no_cb.fps}, {"no_callback_ms", r_no_cb.avg_frame_ms},
+            {"noop_callback_fps", r_noop_cb.fps}, {"noop_callback_ms", r_noop_cb.avg_frame_ms},
+            {"delta_ms", delta_ms}, {"pass", std::abs(delta_ms) <= 0.1}
+        };
+    }
+    report["bm_f_overlay_callback"] = bmf;
 
     // --- Write report ---
     spdlog::info("========================================");
