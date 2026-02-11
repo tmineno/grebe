@@ -4,7 +4,6 @@
 #include "buffer_manager.h"
 #include "renderer.h"
 #include "decimator.h"
-#include "data_generator.h"
 #include "compute_decimator.h"
 
 #include <nlohmann/json.hpp>

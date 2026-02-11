@@ -203,7 +203,6 @@ add_custom_target(compile_shaders DEPENDS ${SHADER_SPIRV_FILES})
 add_library(grebe STATIC
     # Data pipeline core
     src/decimator.cpp
-    src/data_generator.cpp
     src/decimation_thread.cpp
     src/decimation_engine.cpp
     src/synthetic_source.cpp
@@ -291,11 +290,13 @@ endif()
 
 add_executable(grebe-sg
     apps/sg/sg_main.cpp
+    apps/sg/data_generator.cpp
     # IPC transport (shared with grebe-viewer, Phase 7.2)
     apps/common/ipc/pipe_transport.cpp
 )
 
 target_include_directories(grebe-sg PRIVATE
+    ${CMAKE_SOURCE_DIR}/apps/sg
     ${CMAKE_SOURCE_DIR}/apps/common
 )
 
