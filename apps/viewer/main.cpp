@@ -14,6 +14,7 @@
 #include "microbench.h"
 #include "process_handle.h"
 #include "ipc/pipe_transport.h"
+#include "ipc/udp_transport.h"
 #include "ipc/contracts.h"
 
 #include <GLFW/glfw3.h>
@@ -138,15 +139,23 @@ int main(int argc, char* argv[]) {
         }
 
         // =====================================================================
-        // Data source: SyntheticSource (embedded) or TransportSource (IPC)
+        // Data source: SyntheticSource / TransportSource (pipe or UDP)
         // =====================================================================
         std::unique_ptr<SyntheticSource> synthetic_source;
         std::unique_ptr<TransportSource> transport_source;
         std::unique_ptr<ProcessHandle> sg_process;
         std::unique_ptr<PipeConsumer> pipe_consumer;
+        std::unique_ptr<UdpConsumer> udp_consumer;
         IngestionThread ingestion;
 
-        if (opts.embedded) {
+        if (opts.udp_port > 0) {
+            // UDP mode: receive from external grebe-sg, no subprocess
+            udp_consumer = std::make_unique<UdpConsumer>(opts.udp_port);
+            transport_source = std::make_unique<TransportSource>(
+                *udp_consumer, pipeline_config.channel_count);
+            transport_source->start();
+            spdlog::info("UDP mode: listening on port {}", opts.udp_port);
+        } else if (opts.embedded) {
             synthetic_source = std::make_unique<SyntheticSource>(
                 pipeline_config.channel_count, 1'000'000.0, WaveformType::Sine);
             synthetic_source->start();
@@ -172,7 +181,8 @@ int main(int argc, char* argv[]) {
             spdlog::info("IPC mode: spawned grebe-sg PID {}", sg_process->pid());
 
             pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
-            transport_source = std::make_unique<TransportSource>(*pipe_consumer, pipeline_config.channel_count);
+            transport_source = std::make_unique<TransportSource>(
+                *pipe_consumer, pipeline_config.channel_count);
             transport_source->start();
         }
 
@@ -239,7 +249,8 @@ int main(int argc, char* argv[]) {
             synthetic_source->stop();
             ingestion.stop();
         } else if (transport_source) {
-            pipe_consumer.reset();
+            if (pipe_consumer) pipe_consumer.reset();
+            if (udp_consumer) udp_consumer.reset();
             ingestion.stop();
             transport_source->stop();
         }

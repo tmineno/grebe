@@ -2,7 +2,9 @@
 #include "file_reader.h"
 #include "drop_counter.h"
 #include "ring_buffer.h"
+#include "ipc/transport.h"
 #include "ipc/pipe_transport.h"
+#include "ipc/udp_transport.h"
 #include "ipc/contracts.h"
 
 #include <GLFW/glfw3.h>
@@ -35,6 +37,9 @@ struct SgOptions {
     size_t   ring_size    = 67'108'864;  // 64M samples
     uint32_t block_size   = 16384;       // IPC block size (samples/channel/frame)
     std::string file_path;               // --file=PATH: binary file playback
+    std::string transport  = "pipe";     // --transport=pipe|udp
+    std::string udp_host   = "127.0.0.1";
+    uint16_t    udp_port   = 5000;
 };
 
 static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
@@ -63,6 +68,21 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
             opts.block_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
         } else if (arg.rfind("--file=", 0) == 0) {
             opts.file_path = arg.substr(7);
+        } else if (arg.rfind("--transport=", 0) == 0) {
+            opts.transport = arg.substr(12);
+            if (opts.transport != "pipe" && opts.transport != "udp") {
+                spdlog::error("--transport must be 'pipe' or 'udp'");
+                return 1;
+            }
+        } else if (arg.rfind("--udp-target=", 0) == 0) {
+            std::string val = arg.substr(13);
+            auto colon = val.rfind(':');
+            if (colon != std::string::npos) {
+                opts.udp_host = val.substr(0, colon);
+                opts.udp_port = static_cast<uint16_t>(std::stoul(val.substr(colon + 1)));
+            } else {
+                opts.udp_host = val;
+            }
         }
     }
     return 0;
@@ -75,7 +95,7 @@ static int parse_sg_cli(int argc, char* argv[], SgOptions& opts) {
 
 static void sender_thread_func(
     std::vector<RingBuffer<int16_t>*>& rings,
-    PipeProducer& producer,
+    ITransportProducer& producer,
     std::atomic<double>& sample_rate_ref,
     std::vector<DropCounter*>& drop_ptrs,
     uint32_t num_channels,
@@ -135,7 +155,7 @@ static void sender_thread_func(
         total_samples_sent += block_size;
 
         if (!producer.send_frame(header, payload.data())) {
-            spdlog::info("grebe-sg: pipe closed, stopping sender");
+            spdlog::info("grebe-sg: transport closed, stopping sender");
             stop_requested.store(true, std::memory_order_relaxed);
             break;
         }
@@ -148,7 +168,7 @@ static void sender_thread_func(
 // =========================================================================
 
 static void command_reader_func(
-    PipeProducer& producer,
+    ITransportProducer& producer,
     std::atomic<double>& cmd_sample_rate,
     std::atomic<bool>& cmd_toggle_paused,
     std::atomic<bool>& stop_requested)
@@ -286,8 +306,23 @@ int main(int argc, char* argv[]) {
         current_sample_rate.store(file_reader->target_sample_rate(), std::memory_order_relaxed);
     }
 
-    // IPC producer (writes to stdout, reads from stdin)
-    PipeProducer producer;
+    // Transport producer
+    std::unique_ptr<ITransportProducer> transport;
+    if (opts.transport == "udp") {
+        // UDP block size cap: datagram must fit in ~65000 bytes
+        uint32_t max_block = static_cast<uint32_t>(
+            (65000 - sizeof(FrameHeaderV2)) / (opts.num_channels * sizeof(int16_t)));
+        if (opts.block_size > max_block) {
+            spdlog::warn("UDP block_size {} exceeds datagram limit, clamping to {}",
+                         opts.block_size, max_block);
+            opts.block_size = max_block;
+        }
+        transport = std::make_unique<UdpProducer>(opts.udp_host, opts.udp_port);
+        spdlog::info("Transport: UDP -> {}:{}", opts.udp_host, opts.udp_port);
+    } else {
+        transport = std::make_unique<PipeProducer>();
+        spdlog::info("Transport: pipe (stdout/stdin)");
+    }
 
     // Start threads
     std::atomic<bool> stop_requested{false};
@@ -298,13 +333,13 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> cmd_toggle_paused{false};
 
     std::thread sender(sender_thread_func,
-                       std::ref(ring_ptrs), std::ref(producer),
+                       std::ref(ring_ptrs), std::ref(*transport),
                        std::ref(current_sample_rate), std::ref(drop_ptrs),
                        opts.num_channels, std::ref(block_size),
                        std::ref(stop_requested));
 
     std::thread cmd_reader(command_reader_func,
-                           std::ref(producer),
+                           std::ref(*transport),
                            std::ref(cmd_sample_rate),
                            std::ref(cmd_toggle_paused),
                            std::ref(stop_requested));
@@ -389,6 +424,12 @@ int main(int argc, char* argv[]) {
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
             ImGui::Text("grebe-sg Signal Generator");
+            if (opts.transport == "udp") {
+                ImGui::TextDisabled("Transport: UDP -> %s:%u",
+                    opts.udp_host.c_str(), opts.udp_port);
+            } else {
+                ImGui::TextDisabled("Transport: pipe");
+            }
             ImGui::Separator();
             ImGui::Spacing();
 

@@ -15,6 +15,7 @@ struct CliOptions {
     bool no_vsync = false;          // --no-vsync: disable V-Sync
     bool minimized = false;         // --minimized: start window iconified
     std::string file_path;          // --file=PATH: binary file playback via grebe-sg
+    uint16_t udp_port = 0;          // --udp=PORT: receive from external grebe-sg via UDP
 };
 
 // Returns 0 on success, non-zero on error (caller should exit with that code).

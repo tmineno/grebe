@@ -44,10 +44,16 @@ int parse_cli(int argc, char* argv[], CliOptions& opts) {
             }
         } else if (arg.rfind("--file=", 0) == 0) {
             opts.file_path = arg.substr(7);
+        } else if (arg.rfind("--udp=", 0) == 0) {
+            opts.udp_port = static_cast<uint16_t>(std::stoul(arg.substr(6)));
         }
     }
     if (!opts.file_path.empty() && opts.embedded) {
         spdlog::error("--file and --embedded are mutually exclusive");
+        return 1;
+    }
+    if (opts.udp_port > 0 && opts.embedded) {
+        spdlog::error("--udp and --embedded are mutually exclusive");
         return 1;
     }
     return 0;
