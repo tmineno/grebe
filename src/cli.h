@@ -12,6 +12,7 @@ struct CliOptions {
     uint32_t num_channels = 1;
     uint32_t block_size = 16384;    // IPC block size (samples/channel/frame)
     bool no_vsync = false;          // --no-vsync: disable V-Sync
+    bool minimized = false;         // --minimized: start window iconified
 };
 
 // Returns 0 on success, non-zero on error (caller should exit with that code).

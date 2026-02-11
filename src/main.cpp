@@ -114,6 +114,9 @@ int main(int argc, char* argv[]) {
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+        if (opts.minimized) {
+            glfwWindowHint(GLFW_ICONIFIED, GLFW_TRUE);
+        }
 
         GLFWwindow* window = glfwCreateWindow(1920, 1080, "Grebe", nullptr, nullptr);
         if (!window) {

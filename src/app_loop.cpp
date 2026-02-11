@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 static bool g_framebuffer_resized = false;
@@ -178,12 +179,17 @@ void run_main_loop(AppComponents& app) {
             continue;
         }
 
-        // Skip minimized windows
+        // Skip minimized windows (but don't block if profiling)
         {
             int w, h;
             glfwGetFramebufferSize(app.window, &w, &h);
             if (w == 0 || h == 0) {
-                glfwWaitEvents();
+                if (app.enable_profile) {
+                    glfwPollEvents();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                } else {
+                    glfwWaitEvents();
+                }
                 continue;
             }
         }
