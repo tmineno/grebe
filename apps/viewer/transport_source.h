@@ -8,12 +8,12 @@
 class ITransportConsumer;
 struct FrameHeaderV2;
 
-/// IpcSource: IDataSource implementation wrapping IPC pipe transport.
-/// Receives frames from grebe-sg via PipeConsumer.
-class IpcSource : public grebe::IDataSource {
+/// TransportSource: IDataSource implementation wrapping any ITransportConsumer.
+/// Receives frames from grebe-sg via pipe, UDP, or other transport.
+class TransportSource : public grebe::IDataSource {
 public:
-    IpcSource(ITransportConsumer& transport, uint32_t num_channels);
-    ~IpcSource() override = default;
+    TransportSource(ITransportConsumer& transport, uint32_t num_channels);
+    ~TransportSource() override = default;
 
     // IDataSource interface
     grebe::DataSourceInfo info() const override;

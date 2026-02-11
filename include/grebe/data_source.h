@@ -35,7 +35,7 @@ enum class ReadResult {
 
 /// Abstract data source interface.
 /// Implementations: SyntheticSource (embedded waveform generator),
-///                  IpcSource (IPC pipe from grebe-sg),
+///                  TransportSource (IPC pipe from grebe-sg),
 ///                  FileSource (binary file playback).
 class IDataSource {
 public:
@@ -46,7 +46,7 @@ public:
 
     /// Read one block of samples. Blocking behavior is implementation-defined:
     /// - SyntheticSource: blocks for pacing (rate limiting)
-    /// - IpcSource: blocks on pipe read
+    /// - TransportSource: blocks on pipe read
     /// - FileSource: blocks for rate pacing
     virtual ReadResult read_frame(FrameBuffer& frame) = 0;
 

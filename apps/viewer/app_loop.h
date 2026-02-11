@@ -10,7 +10,7 @@ class AppCommandQueue;
 class VulkanRenderer;
 class Hud;
 class SyntheticSource;
-class IpcSource;
+class TransportSource;
 class IngestionThread;
 namespace grebe { class DecimationEngine; }
 class Benchmark;
@@ -23,7 +23,7 @@ struct AppComponents {
     VulkanRenderer* render_backend;
     Hud* hud;
     SyntheticSource* synthetic_source = nullptr;  // non-null in embedded mode
-    IpcSource* ipc_source = nullptr;              // non-null in IPC mode
+    TransportSource* transport_source = nullptr;   // non-null in IPC/UDP mode
     IngestionThread* ingestion = nullptr;
     grebe::DecimationEngine* dec_engine;
     Benchmark* benchmark;

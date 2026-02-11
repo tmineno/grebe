@@ -263,7 +263,7 @@ add_executable(grebe-viewer
     apps/viewer/vma_impl.cpp
     apps/viewer/benchmark.cpp
     # IPC transport (moved from libgrebe Phase 7.2)
-    apps/viewer/ipc_source.cpp
+    apps/viewer/transport_source.cpp
     apps/common/ipc/pipe_transport.cpp
 )
 

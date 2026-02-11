@@ -4,7 +4,7 @@
 #include "drop_counter.h"
 #include "vulkan_renderer.h"
 #include "synthetic_source.h"
-#include "ipc_source.h"
+#include "transport_source.h"
 #include "ingestion_thread.h"
 #include "ring_buffer.h"
 #include "grebe/config.h"
@@ -138,10 +138,10 @@ int main(int argc, char* argv[]) {
         }
 
         // =====================================================================
-        // Data source: SyntheticSource (embedded) or IpcSource (IPC)
+        // Data source: SyntheticSource (embedded) or TransportSource (IPC)
         // =====================================================================
         std::unique_ptr<SyntheticSource> synthetic_source;
-        std::unique_ptr<IpcSource> ipc_source;
+        std::unique_ptr<TransportSource> transport_source;
         std::unique_ptr<ProcessHandle> sg_process;
         std::unique_ptr<PipeConsumer> pipe_consumer;
         IngestionThread ingestion;
@@ -172,8 +172,8 @@ int main(int argc, char* argv[]) {
             spdlog::info("IPC mode: spawned grebe-sg PID {}", sg_process->pid());
 
             pipe_consumer = std::make_unique<PipeConsumer>(stdout_fd, stdin_fd);
-            ipc_source = std::make_unique<IpcSource>(*pipe_consumer, pipeline_config.channel_count);
-            ipc_source->start();
+            transport_source = std::make_unique<TransportSource>(*pipe_consumer, pipeline_config.channel_count);
+            transport_source->start();
         }
 
         // =====================================================================
@@ -202,8 +202,8 @@ int main(int argc, char* argv[]) {
         }
 
         // Start IPC ingestion after dec_engine is ready
-        if (ipc_source) {
-            ingestion.start(*ipc_source, ring_ptrs, drop_ptrs);
+        if (transport_source) {
+            ingestion.start(*transport_source, ring_ptrs, drop_ptrs);
         }
 
         // =====================================================================
@@ -216,7 +216,7 @@ int main(int argc, char* argv[]) {
         app.render_backend = &vk_renderer;
         app.hud = &hud;
         app.synthetic_source = synthetic_source.get();
-        app.ipc_source = ipc_source.get();
+        app.transport_source = transport_source.get();
         app.ingestion = &ingestion;
         app.dec_engine = &dec_engine;
         app.benchmark = &benchmark;
@@ -238,10 +238,10 @@ int main(int argc, char* argv[]) {
         if (synthetic_source) {
             synthetic_source->stop();
             ingestion.stop();
-        } else if (ipc_source) {
+        } else if (transport_source) {
             pipe_consumer.reset();
             ingestion.stop();
-            ipc_source->stop();
+            transport_source->stop();
         }
 
         dec_engine.stop();

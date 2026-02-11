@@ -3,7 +3,7 @@
 #include "drop_counter.h"
 #include "vulkan_renderer.h"
 #include "synthetic_source.h"
-#include "ipc_source.h"
+#include "transport_source.h"
 #include "ingestion_thread.h"
 #include "grebe/decimation_engine.h"
 #include "benchmark.h"
@@ -69,11 +69,11 @@ static void process_commands(AppComponents& app) {
             if constexpr (std::is_same_v<T, CmdSetSampleRate>) {
                 if (app.synthetic_source) {
                     app.synthetic_source->set_sample_rate(c.rate);
-                } else if (app.ipc_source) {
+                } else if (app.transport_source) {
                     IpcCommand ipc{};
                     ipc.type = IpcCommand::SET_SAMPLE_RATE;
                     ipc.value = c.rate;
-                    app.ipc_source->transport().send_command(ipc);
+                    app.transport_source->transport().send_command(ipc);
                 }
                 app.dec_engine->set_sample_rate(c.rate);
                 app.current_sample_rate.store(c.rate, std::memory_order_relaxed);
@@ -83,10 +83,10 @@ static void process_commands(AppComponents& app) {
                 if (app.synthetic_source) {
                     app.synthetic_source->set_paused(!app.synthetic_source->is_paused());
                     app.current_paused.store(app.synthetic_source->is_paused(), std::memory_order_relaxed);
-                } else if (app.ipc_source) {
+                } else if (app.transport_source) {
                     IpcCommand ipc{};
                     ipc.type = IpcCommand::TOGGLE_PAUSED;
-                    app.ipc_source->transport().send_command(ipc);
+                    app.transport_source->transport().send_command(ipc);
                     app.current_paused.store(!app.current_paused.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 }
             } else if constexpr (std::is_same_v<T, CmdToggleVsync>) {
@@ -104,7 +104,7 @@ void run_main_loop(AppComponents& app) {
     // Register GLFW callbacks
     AppState app_state;
     app_state.cmd_queue = app.cmd_queue;
-    app_state.is_ipc_mode = (app.ipc_source != nullptr);
+    app_state.is_ipc_mode = (app.transport_source != nullptr);
     glfwSetWindowUserPointer(app.window, &app_state);
     glfwSetFramebufferSizeCallback(app.window, framebuffer_resize_callback);
     glfwSetKeyCallback(app.window, key_callback);
@@ -240,7 +240,7 @@ void run_main_loop(AppComponents& app) {
         }
 
         // SG-side drops (IPC mode only)
-        uint64_t sg_drops = app.ipc_source ? app.ipc_source->sg_drops_total() : 0;
+        uint64_t sg_drops = app.transport_source ? app.transport_source->sg_drops_total() : 0;
 
         // Build ImGui frame
         app.hud->new_frame();
@@ -364,7 +364,7 @@ void run_main_loop(AppComponents& app) {
                           telemetry.fps, telemetry.frame_time_ms,
                           app.num_channels,
                           grebe::DecimationEngine::algorithm_name(dec_metrics.effective_algorithm),
-                          app.ipc_source ? " | IPC" : "");
+                          app.transport_source ? " | IPC" : "");
             glfwSetWindowTitle(app.window, title);
             last_title_update = now;
         }

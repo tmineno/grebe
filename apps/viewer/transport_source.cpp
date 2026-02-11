@@ -1,14 +1,14 @@
-#include "ipc_source.h"
+#include "transport_source.h"
 #include "ipc/transport.h"
 #include "ipc/contracts.h"
 
 #include <spdlog/spdlog.h>
 
-IpcSource::IpcSource(ITransportConsumer& transport, uint32_t num_channels)
+TransportSource::TransportSource(ITransportConsumer& transport, uint32_t num_channels)
     : transport_(transport)
     , num_channels_(num_channels) {}
 
-grebe::DataSourceInfo IpcSource::info() const {
+grebe::DataSourceInfo TransportSource::info() const {
     grebe::DataSourceInfo si;
     si.channel_count = num_channels_;
     si.sample_rate_hz = sample_rate_.load(std::memory_order_relaxed);
@@ -16,15 +16,15 @@ grebe::DataSourceInfo IpcSource::info() const {
     return si;
 }
 
-void IpcSource::start() {
+void TransportSource::start() {
     started_.store(true, std::memory_order_release);
 }
 
-void IpcSource::stop() {
+void TransportSource::stop() {
     started_.store(false, std::memory_order_release);
 }
 
-grebe::ReadResult IpcSource::read_frame(grebe::FrameBuffer& frame) {
+grebe::ReadResult TransportSource::read_frame(grebe::FrameBuffer& frame) {
     if (!started_.load(std::memory_order_acquire)) {
         return grebe::ReadResult::EndOfStream;
     }
@@ -33,7 +33,7 @@ grebe::ReadResult IpcSource::read_frame(grebe::FrameBuffer& frame) {
     std::vector<int16_t> payload;
 
     if (!transport_.receive_frame(hdr, payload)) {
-        spdlog::info("IpcSource: pipe closed");
+        spdlog::info("TransportSource: connection closed");
         return grebe::ReadResult::EndOfStream;
     }
 
