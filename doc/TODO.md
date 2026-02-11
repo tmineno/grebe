@@ -127,6 +127,88 @@ target_link_libraries(grebe PUBLIC spdlog::spdlog)  # ロギングのみ
 
 ---
 
+## Phase 7.1: リファクタリング性能回帰検証
+
+Phase 1–7 で導入した抽象化レイヤー（DecimationEngine ファサード、overlay callback、
+ファイル移動による再コンパイル）が性能に悪影響を与えていないことを定量検証する。
+
+### ベースライン
+
+Phase 7 実装前に `--bench` / `--profile` で測定しておく（比較対象）。
+
+### 検証項目
+
+| ID | 測定対象 | 方法 | 回帰閾値 |
+|---|---|---|---|
+| R-1 | デシメーションスループット | BM-B (MinMax SIMD) | PoC 比 ≤ 5% 劣化 |
+| R-2 | 描画 FPS (V-Sync OFF) | BM-C (1ch draw loop) | PoC 比 ≤ 5% 劣化 |
+| R-3 | overlay callback オーバーヘッド | BM-C 比較: callback あり vs なし | ≤ 0.1 ms/frame |
+| R-4 | DecimationEngine ファサード | BM-B: DecimationEngine 経由 vs DecimationThread 直接 | ≤ 1% 差 |
+| R-5 | E2E レイテンシ | `--profile` E2E (1ch 1M/10M/100M SPS) | PoC 比 ≤ 10% 劣化 |
+| R-6 | ビルド成果物サイズ | `libgrebe.a` + `grebe-viewer` 合計 | PoC 比 ≤ 5% 増加 |
+
+### 手順
+
+- [ ] Phase 7 実装前にベースライン記録: `--bench` JSON, `--profile` JSON
+- [ ] Phase 7 実装後に同一環境で再測定
+- [ ] R-1 〜 R-6 全項目の before/after を比較、delta を記録
+- [ ] 回帰閾値を超えた項目は原因調査・修正
+
+**受入条件:**
+- R-1 〜 R-6 すべてが回帰閾値以内であること
+- 結果を `doc/TI-phase7.md` に記録
+
+---
+
+## Phase 7.2: IPC トランスポートのライブラリ除去
+
+**設計方針:** IPC パイプはデータ取り込みの「一つの具体的なトランスポート手段」であり、
+純粋なデータパイプラインライブラリのコア責務ではない。ライブラリは `IDataSource` 抽象のみ提供し、
+IPC 実装はアプリ（grebe-viewer / grebe-sg）の責務とする。
+
+### 移動対象
+
+| ファイル | 現在位置 | 消費者 | 移動先 |
+|---|---|---|---|
+| `ipc_source.h/cpp` | `src/` | `apps/viewer/main.cpp`, `app_loop.cpp` | `apps/viewer/` |
+| `transport.h` | `src/ipc/` | ipc_source, pipe_transport, `app_loop.cpp` | `apps/common/ipc/` (共有) |
+| `pipe_transport.h/cpp` | `src/ipc/` | `apps/viewer/main.cpp`, `apps/sg/sg_main.cpp` | `apps/common/ipc/` (共有) |
+| `contracts.h` | `src/ipc/` | ipc_source, pipe_transport, `apps/sg/`, `apps/viewer/` | `apps/common/ipc/` (共有) |
+
+### 設計
+
+- IPC プロトコル定義 (`contracts.h`, `transport.h`, `pipe_transport.h/cpp`) は grebe-viewer と grebe-sg の両方が使う → `apps/common/ipc/` に共有配置
+- `IpcSource` は `IDataSource` 実装だが IPC 固有 → `apps/viewer/` に移動
+- libgrebe は `IDataSource` 抽象インタフェイスのみ保持、具体トランスポートを知らない
+- CMake: `apps/common/` を include path として grebe-viewer と grebe-sg の双方に追加
+
+### Phase 7.2 完了後の libgrebe 構成
+
+**src/ に残るファイル（純粋データパイプラインのみ）:**
+```
+ring_buffer.h, ring_buffer_view.h     — SPSC ロックフリーキュー
+decimator.h/cpp                       — MinMax (SSE2 SIMD), LTTB アルゴリズム
+decimation_thread.h/cpp               — バックグラウンドデシメーションワーカー
+decimation_engine.cpp                 — 公開ファサード
+data_generator.h/cpp                  — 周期タイリング波形生成
+synthetic_source.h/cpp                — IDataSource 実装 (組み込み波形)
+ingestion_thread.h/cpp                — DataSource → RingBuffer ドライバ
+drop_counter.h                        — ドロップカウンタ
+waveform_type.h, waveform_utils.h     — 波形ユーティリティ
+```
+
+**リンク依存（最終形）:**
+```cmake
+target_link_libraries(grebe PUBLIC spdlog::spdlog)
+```
+
+**受入条件:**
+- `nm -C libgrebe.a | grep -c "IpcSource\|PipeConsumer\|PipeProducer\|FrameHeaderV2"` → 0
+- grebe-viewer IPC モード (`build/grebe-viewer`) で grebe-sg 経由のストリーミングが動作すること
+- grebe-sg が `apps/common/ipc/` の共有ヘッダでビルドできること
+
+---
+
 ## Phase 8: FileSource (FR-01)
 
 バイナリファイル再生用の IDataSource 実装。
@@ -196,6 +278,8 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 5. Config + Telemetry | FR-05, FR-07 | ✅ 完了 |
 | 6. libgrebe デカップリング | HUD/ImGui 除去 | ✅ 完了 |
 | 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | 未着手 |
+| 7.1 性能回帰検証 | BM-B/C/E、E2E、overlay callback | 未着手 |
+| 7.2 IPC トランスポート除去 | IpcSource/pipe_transport → apps/ | 未着手 |
 | 8. FileSource | FR-01 | 未着手 |
 | 9. UdpSource | FR-01 | 未着手 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
