@@ -69,19 +69,61 @@ Renderer を IRenderBackend 実装に分離し、描画バックエンドの差�
 
 ---
 
-## Phase 7 (次回): Vulkan 描画のライブラリ除去
+## Phase 7 (次回): libgrebe をデータパイプラインに純化
 
 **設計方針:** libgrebe の本質的価値はデータパイプライン (取り込み → デシメーション → 出力) であり、
-Vulkan 描画は本来アプリの責務。ライブラリを純粋なデータパイプラインに絞る。
+描画・計測・ロギングは本来アプリの責務。ライブラリを純粋なデータパイプラインに絞る。
 
-- [ ] Vulkan 描画一式 (VulkanContext, Swapchain, Renderer, BufferManager, VulkanRenderer, ComputeDecimator, vma_impl) を `apps/viewer/` に移動
-- [ ] libgrebe のリンク依存から Vulkan, GLFW, vk-bootstrap, VMA, glm を除去
-- [ ] IRenderBackend はインターフェイス定義のみライブラリに残す (描画実装はアプリ側)
-- [ ] libgrebe の公開 API: DataSource → RingBuffer → DecimationEngine → DecimatedOutput + TelemetrySnapshot
+### 7a. Vulkan 描画一式の除去
+
+- [ ] Vulkan 描画モジュールを `apps/viewer/` に移動:
+  - `vulkan_context.h/cpp`, `swapchain.h/cpp`, `renderer.h/cpp`
+  - `buffer_manager.h/cpp`, `vulkan_renderer.h/cpp`
+  - `compute_decimator.h/cpp`, `vma_impl.cpp`
+- [ ] libgrebe のリンク依存から除去: Vulkan, GLFW, vk-bootstrap, VMA, glm, stb_headers
+- [ ] `render_backend.h` (IRenderBackend インタフェイス定義) はライブラリに残すか検討
+  - データパイプライン自体は描画を知らない → 残す意味は薄い
+  - ただしヘッダのみでリンク依存なし → 残してもコストゼロ
+
+### 7b. Benchmark (テレメトリ計測) の除去
+
+- [ ] `benchmark.h/cpp` を `apps/viewer/` に移動
+  - ライブラリ内で自己参照のみ (`benchmark.cpp` → `benchmark.h`)、外部消費は全て `apps/viewer/`
+  - フレーム単位のローリング平均、CSV ロギングはアプリの計測関心事
+  - `TelemetrySnapshot` 構造体は `include/grebe/telemetry.h` に残す (データ定義のみ)
+
+### 7c. 不要なリンク依存の除去
+
+- [ ] `nlohmann_json::nlohmann_json` を libgrebe から除去 (src/ 内で使用箇所なし — profiler/microbench 移動済み)
+- [ ] `stb_headers` を libgrebe から除去 (src/ 内で使用箇所なし)
+
+### 7d. Phase 7 完了後の libgrebe 構成
+
+**src/ に残るファイル (データパイプラインコア):**
+```
+ring_buffer.h, ring_buffer_view.h     — SPSC ロックフリーキュー
+decimator.h/cpp                       — MinMax (SSE2 SIMD), LTTB アルゴリズム
+decimation_thread.h/cpp               — バックグラウンドデシメーションワーカー
+decimation_engine.cpp                 — 公開ファサード
+data_generator.h/cpp                  — 周期タイリング波形生成
+synthetic_source.h/cpp                — IDataSource 実装 (組み込み波形)
+ipc_source.h/cpp                      — IDataSource 実装 (IPC パイプ)
+ingestion_thread.h/cpp                — DataSource → RingBuffer ドライバ
+ipc/transport.h, pipe_transport.h/cpp — プラットフォーム IPC 実装
+ipc/contracts.h                       — フレームヘッダ・コマンド構造体
+drop_counter.h                        — ドロップカウンタ
+waveform_type.h, waveform_utils.h     — 波形ユーティリティ
+```
+
+**リンク依存 (最小):**
+```cmake
+target_link_libraries(grebe PUBLIC spdlog::spdlog)  # ロギングのみ
+```
 
 **受入条件:**
-- libgrebe が Vulkan/GLFW に非依存でビルドできること
-- grebe-viewer が libgrebe + Vulkan 描画コードで既存動作を維持すること
+- libgrebe が Vulkan/GLFW/ImGui/JSON に非依存でビルドできること
+- `nm -C libgrebe.a | grep -c "Vulkan\|vk\|Swapchain\|Benchmark"` → 0
+- grebe-viewer が libgrebe + Vulkan 描画コードで既存全モード動作を維持すること
 
 ---
 
@@ -153,7 +195,7 @@ Windows MSVC ビルドと CMake パッケージ配布。
 | 4. DecimationEngine API | FR-02, FR-03 | ✅ 完了 |
 | 5. Config + Telemetry | FR-05, FR-07 | ✅ 完了 |
 | 6. libgrebe デカップリング | HUD/ImGui 除去 | ✅ 完了 |
-| 7. Vulkan 描画除去 | データパイプライン純化 | 未着手 |
+| 7. データパイプライン純化 | Vulkan/Benchmark/不要依存の除去 | 未着手 |
 | 8. FileSource | FR-01 | 未着手 |
 | 9. UdpSource | FR-01 | 未着手 |
 | 10. grebe-bench | NFR-01, NFR-02 | 未着手 |
