@@ -1,6 +1,6 @@
 #include "ipc_source.h"
-#include "transport.h"
-#include "contracts.h"
+#include "ipc/transport.h"
+#include "ipc/contracts.h"
 
 #include <spdlog/spdlog.h>
 

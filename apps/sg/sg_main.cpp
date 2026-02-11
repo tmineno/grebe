@@ -1,8 +1,8 @@
 #include "data_generator.h"
 #include "drop_counter.h"
 #include "ring_buffer.h"
-#include "pipe_transport.h"
-#include "contracts.h"
+#include "ipc/pipe_transport.h"
+#include "ipc/contracts.h"
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>

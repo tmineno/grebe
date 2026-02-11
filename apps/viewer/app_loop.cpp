@@ -9,8 +9,8 @@
 #include "benchmark.h"
 #include "hud.h"
 #include "profiler.h"
-#include "transport.h"
-#include "contracts.h"
+#include "ipc/transport.h"
+#include "ipc/contracts.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>

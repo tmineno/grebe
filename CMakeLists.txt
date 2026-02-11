@@ -207,15 +207,12 @@ add_library(grebe STATIC
     src/decimation_thread.cpp
     src/decimation_engine.cpp
     src/synthetic_source.cpp
-    src/ipc_source.cpp
     src/ingestion_thread.cpp
-    src/ipc/pipe_transport.cpp
 )
 
 target_include_directories(grebe PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/ipc
 )
 
 target_link_libraries(grebe PUBLIC
@@ -252,12 +249,16 @@ add_executable(grebe-viewer
     apps/viewer/compute_decimator.cpp
     apps/viewer/vma_impl.cpp
     apps/viewer/benchmark.cpp
+    # IPC transport (moved from libgrebe Phase 7.2)
+    apps/viewer/ipc_source.cpp
+    apps/common/ipc/pipe_transport.cpp
 )
 
 add_dependencies(grebe-viewer compile_shaders)
 
 target_include_directories(grebe-viewer PRIVATE
     ${CMAKE_SOURCE_DIR}/apps/viewer
+    ${CMAKE_SOURCE_DIR}/apps/common
 )
 
 target_compile_definitions(grebe-viewer PRIVATE
@@ -290,6 +291,12 @@ endif()
 
 add_executable(grebe-sg
     apps/sg/sg_main.cpp
+    # IPC transport (shared with grebe-viewer, Phase 7.2)
+    apps/common/ipc/pipe_transport.cpp
+)
+
+target_include_directories(grebe-sg PRIVATE
+    ${CMAKE_SOURCE_DIR}/apps/common
 )
 
 target_link_libraries(grebe-sg PRIVATE

@@ -103,13 +103,12 @@ decimation_thread.h/cpp               — バックグラウンドデシメー�
 decimation_engine.cpp                 — 公開ファサード
 data_generator.h/cpp                  — 周期タイリング波形生成
 synthetic_source.h/cpp                — IDataSource 実装 (組み込み波形)
-ipc_source.h/cpp                      — IDataSource 実装 (IPC パイプ)
 ingestion_thread.h/cpp                — DataSource → RingBuffer ドライバ
-ipc/transport.h, pipe_transport.h/cpp — プラットフォーム IPC 実装
-ipc/contracts.h                       — フレームヘッダ・コマンド構造体
 drop_counter.h                        — ドロップカウンタ
 waveform_type.h, waveform_utils.h     — 波形ユーティリティ
 ```
+
+> **Note:** Phase 7.2 で IPC 関連 (`ipc_source.h/cpp`, `ipc/`) を `apps/` に移動済み。
 
 **リンク依存 (最小):**
 ```cmake
@@ -117,9 +116,9 @@ target_link_libraries(grebe PUBLIC spdlog::spdlog)  # ロギングのみ
 ```
 
 **検証結果:**
-- ✅ libgrebe.a: 179K (PoC 641K → 72% 削減)
-- ✅ `nm -C libgrebe.a | grep -c "Vulkan\|vk\|Swapchain\|Benchmark"` → 0
-- ✅ grebe, grebe-viewer, grebe-sg 全ターゲットがビルド成功
+- ✅ libgrebe.a: 147K (PoC 641K → 77% 削減)
+- ✅ `nm -C libgrebe.a | grep -c "Vulkan\|vk\|Swapchain\|Benchmark\|IpcSource\|PipeConsumer"` → 0
+- ✅ grebe, grebe-viewer, grebe-sg, grebe-bench 全ターゲットがビルド成功
 
 ---
 
@@ -148,7 +147,7 @@ Phase 1–7 で導入した抽象化レイヤー（DecimationEngine ファサー
 
 ---
 
-## Phase 7.2: IPC トランスポートのライブラリ除去
+## Phase 7.2: IPC トランスポートのライブラリ除去 ✅
 
 **設計方針:** IPC パイプはデータ取り込みの「一つの具体的なトランスポート手段」であり、
 純粋なデータパイプラインライブラリのコア責務ではない。ライブラリは `IDataSource` 抽象のみ提供し、
@@ -165,10 +164,16 @@ IPC 実装はアプリ（grebe-viewer / grebe-sg）の責務とする。
 
 ### 設計
 
-- IPC プロトコル定義 (`contracts.h`, `transport.h`, `pipe_transport.h/cpp`) は grebe-viewer と grebe-sg の両方が使う → `apps/common/ipc/` に共有配置
-- `IpcSource` は `IDataSource` 実装だが IPC 固有 → `apps/viewer/` に移動
-- libgrebe は `IDataSource` 抽象インタフェイスのみ保持、具体トランスポートを知らない
-- CMake: `apps/common/` を include path として grebe-viewer と grebe-sg の双方に追加
+- [x] IPC プロトコル定義 (`contracts.h`, `transport.h`, `pipe_transport.h/cpp`) は grebe-viewer と grebe-sg の両方が使う → `apps/common/ipc/` に共有配置
+- [x] `IpcSource` は `IDataSource` 実装だが IPC 固有 → `apps/viewer/` に移動
+- [x] libgrebe は `IDataSource` 抽象インタフェイスのみ保持、具体トランスポートを知らない
+- [x] CMake: `apps/common/` を include path として grebe-viewer と grebe-sg の双方に追加
+
+### 検証結果
+
+- ✅ `nm -C libgrebe.a | grep -c "IpcSource\|PipeConsumer\|PipeProducer\|FrameHeaderV2"` → 0
+- ✅ libgrebe.a: 147K (Phase 7 179K → 18% 削減)
+- ✅ grebe, grebe-viewer, grebe-sg, grebe-bench 全ターゲットがビルド成功
 
 ### Phase 7.2 完了後の libgrebe 構成
 

@@ -13,8 +13,8 @@
 #include "profiler.h"
 #include "microbench.h"
 #include "process_handle.h"
-#include "pipe_transport.h"
-#include "contracts.h"
+#include "ipc/pipe_transport.h"
+#include "ipc/contracts.h"
 
 #include <GLFW/glfw3.h>
 #include <spdlog/spdlog.h>
